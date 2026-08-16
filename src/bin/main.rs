@@ -9,11 +9,12 @@
 use embedded_graphics::{
     pixelcolor::Rgb565,
     prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
     text::Text,
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
 
-use cardputer_rust::{config, net, ui, wifi};
+use cardputer_rust::{config, keyboard, net, ui, wifi};
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -22,12 +23,15 @@ use esp_hal::{
     timer::timg::TimerGroup,
     delay::Delay,
     gpio::{Level, Output, OutputConfig},
+    i2c::master::{Config as I2cConfig, I2c},
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
     },
     time::Rate,
 };
+
+use tca8418::{PinMask, Tca8418};
 
 use log::info;
 
@@ -171,6 +175,21 @@ async fn main(_spawner: Spawner) {
     )
     .draw(&mut display)
     .unwrap();
+
+    // キーボード (TCA8418) を I2C0 で初期化。
+    // SDA = GPIO8, SCL = GPIO9
+    let i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+    )
+    .unwrap()
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
+
+    let mut keypad = Tca8418::new(i2c);
+    keypad.configure_keypad(PinMask::ALL).unwrap();
+
+    info!("Keyboard initialized");
 
     /*
     info!("Scanning Wi-Fi...");
@@ -319,8 +338,112 @@ async fn main(_spawner: Spawner) {
 
                     info!("HTTP complete");
 
+                    // ---- キーボード入力ループ（ネットワークと共存）----
+                    // レイアウト定数（画面: 240x135, FONT_10X20）
+                    const CHAR_W: i32 = 10;
+                    const CHAR_H: i32 = 20;
+                    const LEFT: i32 = 10;
+                    const RIGHT: i32 = 230;
+                    const TOP: i32 = 40;
+
+                    let mut cursor_x = LEFT;
+                    let mut cursor_y = TOP;
+                    let mut shift_down = false;
+
+                    info!("Keyboard ready");
+
                     loop {
-                        embassy_time::Timer::after_secs(1).await;
+                        for event in keypad.events().unwrap() {
+                            if let Some(key) = event.pressed_keypad() {
+                                let (row, col) =
+                                    keyboard::remap_key(key.row, key.col);
+
+                                match (row, col) {
+                                    // Shift
+                                    (2, 1) => shift_down = true,
+
+                                    // Backspace: 直前のセルを黒で塗って消す
+                                    (0, 13) => {
+                                        if cursor_x > LEFT {
+                                            cursor_x -= CHAR_W;
+
+                                            Rectangle::new(
+                                                Point::new(
+                                                    cursor_x,
+                                                    cursor_y - CHAR_H + 4,
+                                                ),
+                                                Size::new(
+                                                    CHAR_W as u32,
+                                                    CHAR_H as u32,
+                                                ),
+                                            )
+                                            .into_styled(
+                                                PrimitiveStyle::with_fill(
+                                                    Rgb565::BLACK,
+                                                ),
+                                            )
+                                            .draw(&mut display)
+                                            .unwrap();
+                                        }
+                                    }
+
+                                    // Enter: 改行
+                                    (2, 13) => {
+                                        cursor_x = LEFT;
+                                        cursor_y += CHAR_H;
+                                    }
+
+                                    // 修飾キー (Tab/FN/Ctrl/Opt/Alt) は無視
+                                    (1, 0) | (2, 0) | (3, 0) | (3, 1)
+                                    | (3, 2) => {}
+
+                                    // 通常キー: 文字を描画
+                                    _ => {
+                                        if let Some(ch) = keyboard::key_to_char(
+                                            key.row, key.col,
+                                        ) {
+                                            let ch = if shift_down {
+                                                keyboard::shift_char(ch)
+                                            } else {
+                                                ch
+                                            };
+
+                                            let mut buf = [0u8; 4];
+                                            let s = ch.encode_utf8(&mut buf);
+
+                                            Text::new(
+                                                s,
+                                                Point::new(cursor_x, cursor_y),
+                                                style,
+                                            )
+                                            .draw(&mut display)
+                                            .unwrap();
+
+                                            cursor_x += CHAR_W;
+
+                                            // 右端で自動改行
+                                            if cursor_x > RIGHT - CHAR_W {
+                                                cursor_x = LEFT;
+                                                cursor_y += CHAR_H;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(key) = event.released_keypad() {
+                                let (row, col) =
+                                    keyboard::remap_key(key.row, key.col);
+
+                                if (row, col) == (2, 1) {
+                                    shift_down = false;
+                                }
+                            }
+                        }
+
+                        // executor に処理を譲り、
+                        // 裏で runner.run()（ネットワーク）を動かし続ける。
+                        embassy_time::Timer::after_millis(20).await;
                     }
                 },
             )
@@ -330,217 +453,4 @@ async fn main(_spawner: Spawner) {
             info!("Wi-Fi connection failed: {:?}", e);
         }
     }
-
-    
-
-    /*
-    let i2c_config = I2cConfig::default()
-        .with_frequency(Rate::from_khz(400));
-
-    let i2c = I2c::new(
-        peripherals.I2C0,
-        i2c_config,
-    )
-    .unwrap()
-    .with_sda(peripherals.GPIO8)
-    .with_scl(peripherals.GPIO9);
-
-    let mut keypad = Tca8418::new(i2c);
-
-    // Cardputer Advは4行×14列ですが、
-    // TCA8418側では最大8行×10列なので、まず全ピンを有効化してイベント確認
-    keypad
-        .configure_keypad(PinMask::ALL)
-        .unwrap();
-
-    info!("Keyboard initialized");
-
-    info!("LCD test start");
-
-    // LCDバックライト
-    let _backlight = Output::new(
-        peripherals.GPIO38,
-        Level::High,
-        OutputConfig::default(),
-    );
-
-    // LCD制御用GPIO
-    let dc = Output::new(
-        peripherals.GPIO34,
-        Level::Low,
-        OutputConfig::default(),
-    );
-
-    let reset = Output::new(
-        peripherals.GPIO33,
-        Level::High,
-        OutputConfig::default(),
-    );
-
-    let cs = Output::new(
-        peripherals.GPIO37,
-        Level::High,
-        OutputConfig::default(),
-    );
-
-    // SPI
-    // MOSI = GPIO35
-    // SCK  = GPIO36
-    let spi = Spi::new(
-        peripherals.SPI2,
-        SpiConfig::default()
-            .with_frequency(Rate::from_mhz(20))
-            .with_mode(Mode::_0),
-    )
-    .unwrap()
-    .with_sck(peripherals.GPIO36)
-    .with_mosi(peripherals.GPIO35);
-
-    let spi_device = ExclusiveDevice::new_no_delay(spi, cs).unwrap();
-
-    // mipidsi用バッファ
-    let mut buffer = [0_u8; 512];
-
-    let di = SpiInterface::new(
-        spi_device,
-        dc,
-        &mut buffer,
-    );
-
-    let mut delay = Delay::new();
-
-    let mut display = Builder::new(ST7789, di)
-        .reset_pin(reset)
-        .display_size(135, 240)
-        .display_offset(52, 40)
-        .orientation(
-            Orientation::new()
-                .rotate(Rotation::Deg90)
-        )
-        .invert_colors(ColorInversion::Inverted)
-        .init(&mut delay)
-        .unwrap();
-
-    info!("LCD initialized");
-
-    display.clear(Rgb565::BLACK).unwrap();
-
-    let style = MonoTextStyle::new(
-        &FONT_10X20,
-        Rgb565::WHITE,
-    );
-
-    let mut x = 10;
-    let mut y = 40;
-
-    const CHAR_W: i32 = 10;
-    const CHAR_H: i32 = 20;
-
-    const LEFT: i32 = 10;
-    const RIGHT: i32 = 230;
-    const TOP: i32 = 40;
-    const BOTTOM: i32 = 125;
-
-    Text::new(
-        "Hello Rust!",
-        Point::new(20, 70),
-        style,
-    )
-    .draw(&mut display)
-    .unwrap();
-
-    info!("LCD painted BLACK with text");
-
-    let mut shift_down = false;
-
-    loop {
-        for event in keypad.events().unwrap() {
-            if let Some(key) = event.pressed_keypad() {
-                let (row, col) = remap_key(key.row, key.col);
-
-                match (row, col) {
-                    // Shift
-                    (2, 1) => {
-                        shift_down = true;
-                        info!("SHIFT DOWN");
-                    }
-
-                    // Backspace
-                    (0, 13) => {
-                        if x > LEFT {
-                            x -= CHAR_W;
-
-                            Rectangle::new(
-                                Point::new(x, y - CHAR_H + 4),
-                                Size::new(CHAR_W as u32, CHAR_H as u32),
-                            )
-                            .into_styled(
-                                PrimitiveStyle::with_fill(Rgb565::BLACK)
-                            )
-                            .draw(&mut display)
-                            .unwrap();
-                        }
-
-                        info!("BACKSPACE");
-                    }
-
-                    // Enter
-                    (2, 13) => {
-                        x = LEFT;
-                        y += CHAR_H;
-
-                        info!("ENTER");
-                    }
-
-                    (1, 0) => info!("TAB"),
-                    (2, 0) => info!("FN"),
-                    (3, 0) => info!("CTRL"),
-                    (3, 1) => info!("OPT"),
-                    (3, 2) => info!("ALT"),
-
-                    _ => {
-                        if let Some(ch) = key_to_char(key.row, key.col) {
-                            let ch = if shift_down {
-                                shift_char(ch)
-                            } else {
-                                ch
-                            };
-
-                            let mut buf = [0u8; 4];
-                            let s = ch.encode_utf8(&mut buf);
-
-                            Text::new(
-                                s,
-                                Point::new(x, y),
-                                style,
-                            )
-                            .draw(&mut display)
-                            .unwrap();
-
-                            x += CHAR_W;
-
-                            // 右端まで来たら自動改行
-                            if x > RIGHT - CHAR_W {
-                                x = LEFT;
-                                y += CHAR_H;
-                            }
-
-                            info!("KEY {}", ch);
-                        }
-                    }
-                }
-            }
-
-            if let Some(key) = event.released_keypad() {
-                let (row, col) = remap_key(key.row, key.col);
-
-                if (row, col) == (2, 1) {
-                    shift_down = false;
-                    info!("SHIFT UP");
-                }
-            }
-        }
-        
-    }
-    */
 }
