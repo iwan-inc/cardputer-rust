@@ -6,10 +6,21 @@ M5Stack Cardputer Adv (ESP32-S3) 用の Rust `no_std` プロジェクト。
 ## 現在できること
 
 - ESP32-S3 / `no_std` / embassy (async) で動作
-- ST7789 LCD 表示
-- TCA8418 キーボード入力（Shift / Enter / Backspace）
-- Wi-Fi 接続・DHCP 取得
-- HTTP サーバーへ GET し、レスポンス本文を LCD 表示
+- ST7789 LCD 表示、TCA8418 キーボード入力（リピート / 行またぎ Backspace / 点滅カーソル）
+- Wi-Fi 接続（リトライ、失敗時は AP 一覧表示 → オフライン動作）
+- 起動時に HTTP GET でメッセージ表示
+- **Enter で入力をサーバへ送信し、サーバが描画した画像（日本語対応）を表示**
+- サーバのコマンド: `tenki [場所]`（天気）, `time`（時刻）, `help`
+
+### 特殊キー
+
+| キー | 動作 |
+|---|---|
+| Enter | 入力を送信（オフライン時は改行） |
+| Fn + Del | 全消去 |
+| Fn + W | アクセスポイント一覧 |
+| Fn + I | IP アドレス表示 |
+| Fn + R | 再起動 |
 
 ## セットアップ
 
@@ -31,12 +42,29 @@ cargo build --release
 cargo run --release   # espflash で書き込み + モニタ
 ```
 
+## サーバー（server/）
+
+入力の送信先。テキストを 240x135 の 1bit 画像に描画して返すため、日本語も
+表示できる。macOS の日本語フォント（ヒラギノ等）と Pillow を使う。
+
+```sh
+cd server
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python server.py          # 既定ポート 18080
+```
+
+デバイスの接続先は `src/config.rs`（`SERVER_IP` / `SERVER_PORT`）で設定する。
+`.venv/` は git 管理外。
+
 ## 構成
 
 - `src/bin/main.rs` — エントリポイント（ペリフェラル初期化とメイン処理）
 - `src/config.rs` — 設定値の一元管理
 - `src/secrets.rs` — Wi-Fi 認証情報（git 管理外、`secrets.example.rs` から作成）
-- `src/wifi.rs` — Wi-Fi 接続設定
-- `src/net.rs` — HTTP リクエスト組み立て・レスポンス解析
+- `src/wifi.rs` — Wi-Fi 接続設定・スキャン
+- `src/net.rs` — HTTP リクエスト組み立て・送受信・レスポンス解析
 - `src/keyboard.rs` — キーボードのキーマップ変換
-- `src/ui.rs` — LCD 表示ヘルパ
+- `src/terminal.rs` — キーボード入力ループ（送信・AP一覧・IP・再起動）
+- `src/ui.rs` — LCD 表示ヘルパ（テキスト・画像・一覧）
+- `server/` — Python の API サーバー（画像描画・コマンド）

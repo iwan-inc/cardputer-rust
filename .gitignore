@@ -27,3 +27,7 @@ target/
 
 # Secrets (Wi-Fi credentials). Copy src/secrets.example.rs to src/secrets.rs.
 /src/secrets.rs
+
+# Python server virtualenv / caches
+/server/.venv/
+**/__pycache__/
