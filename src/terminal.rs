@@ -1,0 +1,316 @@
+//! 端末のキーボード入力ループ。
+//!
+//! キーボード (TCA8418) を読み、打鍵した文字を LCD に表示し続ける。
+//! ネットワークタスクと同じ executor 上で共存させるため、
+//! 各周回で短時間スリープして処理を譲る。
+//!
+//! 機能:
+//! - キーリピート（押しっぱなしで連続入力）
+//! - 行をまたぐ Backspace（行頭で押すと前行末尾を削除）
+//! - Fn + Backspace で全消去（先頭行へ）
+
+use embedded_graphics::{
+    mono_font::MonoTextStyle,
+    pixelcolor::Rgb565,
+    prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
+    text::Text,
+};
+use embedded_hal::i2c::I2c;
+use tca8418::Tca8418;
+
+use crate::keyboard;
+
+// レイアウト定数（画面 240x135, FONT_10X20）
+const CHAR_W: i32 = 10;
+const CHAR_H: i32 = 20;
+const LEFT: i32 = 10;
+const RIGHT: i32 = 230;
+const TOP: i32 = 20;
+/// 画面に収まる行数（y = TOP + 行*CHAR_H）。
+const MAX_LINES: usize = 6;
+
+// キーリピートのタイミング（1 周回 = 約 20ms）
+/// 押してから最初のリピートまでの周回数（約 400ms）。
+const REPEAT_DELAY_TICKS: u32 = 20;
+/// リピート間隔の周回数（約 80ms）。
+const REPEAT_INTERVAL_TICKS: u32 = 4;
+
+/// カーソル位置と各行の終端 x を管理する簡易テキスト状態。
+struct Editor {
+    cursor_x: i32,
+    cursor_y: i32,
+    /// 現在行（0..MAX_LINES）。
+    line: usize,
+    /// 各行の「次に文字を置く x」（＝入力済みの終端）。
+    line_end: [i32; MAX_LINES],
+}
+
+impl Editor {
+    fn new() -> Self {
+        Self {
+            cursor_x: LEFT,
+            cursor_y: TOP,
+            line: 0,
+            line_end: [LEFT; MAX_LINES],
+        }
+    }
+
+    /// 次の行へ移動する。最終行では折り返さず先頭に戻る（簡易）。
+    fn advance_line(&mut self) {
+        if self.line + 1 < MAX_LINES {
+            self.line += 1;
+            self.cursor_y += CHAR_H;
+            self.cursor_x = LEFT;
+            self.line_end[self.line] = LEFT;
+        } else {
+            // 最終行の末尾: 先頭に戻して上書き継続。
+            self.cursor_x = LEFT;
+            self.line_end[self.line] = LEFT;
+        }
+    }
+
+    /// 1 文字描画してカーソルを進める。右端で自動改行。
+    fn put_char<D>(&mut self, display: &mut D, style: MonoTextStyle<'_, Rgb565>, ch: char)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+
+        let _ = Text::new(s, Point::new(self.cursor_x, self.cursor_y), style)
+            .draw(display);
+
+        self.cursor_x += CHAR_W;
+        self.line_end[self.line] = self.cursor_x;
+
+        if self.cursor_x > RIGHT - CHAR_W {
+            self.advance_line();
+        }
+    }
+
+    /// 改行する。
+    fn newline(&mut self) {
+        self.line_end[self.line] = self.cursor_x;
+        self.advance_line();
+    }
+
+    /// 指定セルを黒で塗ってカーソルをそこへ置く。
+    fn erase_cell<D>(&mut self, display: &mut D)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let _ = Rectangle::new(
+            Point::new(self.cursor_x, self.cursor_y - CHAR_H + 4),
+            Size::new(CHAR_W as u32, CHAR_H as u32),
+        )
+        .into_styled(PrimitiveStyle::with_fill(Rgb565::BLACK))
+        .draw(display);
+
+        self.line_end[self.line] = self.cursor_x;
+    }
+
+    /// 1 文字削除。行頭では前行の末尾へ回り込んで削除する。
+    fn backspace<D>(&mut self, display: &mut D)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        if self.cursor_x > LEFT {
+            self.cursor_x -= CHAR_W;
+            self.erase_cell(display);
+        } else if self.line > 0 {
+            // 前行の末尾へ移動。
+            self.line -= 1;
+            self.cursor_y -= CHAR_H;
+            self.cursor_x = self.line_end[self.line];
+
+            // 前行に文字があれば 1 文字削除する。
+            if self.cursor_x > LEFT {
+                self.cursor_x -= CHAR_W;
+                self.erase_cell(display);
+            }
+        }
+    }
+
+    /// 全消去して先頭行へ。
+    fn clear<D>(&mut self, display: &mut D)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let _ = display.clear(Rgb565::BLACK);
+        self.cursor_x = LEFT;
+        self.cursor_y = TOP;
+        self.line = 0;
+        self.line_end = [LEFT; MAX_LINES];
+    }
+
+    /// カーソル位置のアンダーラインを指定色で塗る。
+    ///
+    /// カーソルは常に空セル上にあるため、塗っても文字を壊さない。
+    fn fill_cursor<D>(&self, display: &mut D, color: Rgb565)
+    where
+        D: DrawTarget<Color = Rgb565>,
+    {
+        let _ = Rectangle::new(
+            Point::new(self.cursor_x, self.cursor_y + 2),
+            Size::new(CHAR_W as u32, 3),
+        )
+        .into_styled(PrimitiveStyle::with_fill(color))
+        .draw(display);
+    }
+}
+
+/// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
+///
+/// 表示エラーは無視して継続する（端末を落とさないため）。
+pub async fn run_input<D, I>(
+    display: &mut D,
+    keypad: &mut Tca8418<I>,
+    style: MonoTextStyle<'_, Rgb565>,
+) where
+    D: DrawTarget<Color = Rgb565>,
+    I: I2c,
+{
+    let mut editor = Editor::new();
+    let mut shift_down = false;
+    let mut fn_down = false;
+
+    // 押しっぱなしのキー（生の row/col）とリピート用カウンタ。
+    let mut held: Option<(u8, u8)> = None;
+    let mut repeat_countdown: u32 = 0;
+
+    // カーソル点滅の状態。
+    /// 点滅の周回数（約 500ms）。
+    const BLINK_TICKS: u32 = 25;
+    let mut blink_on = true;
+    let mut blink_ticks: u32 = 0;
+    let mut cursor_shown = false;
+
+    loop {
+        // 入力やカーソル描画の前に、表示中のカーソルを消して土台を綺麗にする。
+        if cursor_shown {
+            editor.fill_cursor(display, Rgb565::BLACK);
+            cursor_shown = false;
+        }
+
+        let mut acted = false;
+
+        // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
+        if let Ok(events) = keypad.events() {
+            for event in events {
+                if let Some(key) = event.pressed_keypad() {
+                    let (row, col) = keyboard::remap_key(key.row, key.col);
+
+                    match (row, col) {
+                        // Shift / Fn（修飾キー: リピート対象外）
+                        (2, 1) => shift_down = true,
+                        (2, 0) => fn_down = true,
+
+                        // Backspace（Fn 併用で全消去）
+                        (0, 13) => {
+                            if fn_down {
+                                editor.clear(display);
+                                held = None;
+                            } else {
+                                editor.backspace(display);
+                                held = Some((key.row, key.col));
+                                repeat_countdown = REPEAT_DELAY_TICKS;
+                            }
+                            acted = true;
+                        }
+
+                        // Enter（リピート対象外）
+                        (2, 13) => {
+                            editor.newline();
+                            held = None;
+                            acted = true;
+                        }
+
+                        // その他の修飾キー (Tab/Ctrl/Opt/Alt) は無視
+                        (1, 0) | (3, 0) | (3, 1) | (3, 2) => {}
+
+                        // 通常キー: 文字を描画（リピート対象）
+                        _ => {
+                            if let Some(ch) =
+                                keyboard::key_to_char(key.row, key.col)
+                            {
+                                let ch = if shift_down {
+                                    keyboard::shift_char(ch)
+                                } else {
+                                    ch
+                                };
+                                editor.put_char(display, style, ch);
+                                held = Some((key.row, key.col));
+                                repeat_countdown = REPEAT_DELAY_TICKS;
+                                acted = true;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(key) = event.released_keypad() {
+                    let (row, col) = keyboard::remap_key(key.row, key.col);
+
+                    match (row, col) {
+                        (2, 1) => shift_down = false,
+                        (2, 0) => fn_down = false,
+                        _ => {
+                            if held == Some((key.row, key.col)) {
+                                held = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 押しっぱなしのキーをリピート入力する。
+        if let Some((raw_row, raw_col)) = held {
+            if repeat_countdown > 0 {
+                repeat_countdown -= 1;
+            }
+
+            if repeat_countdown == 0 {
+                let (row, col) = keyboard::remap_key(raw_row, raw_col);
+
+                if (row, col) == (0, 13) {
+                    editor.backspace(display);
+                } else if let Some(ch) =
+                    keyboard::key_to_char(raw_row, raw_col)
+                {
+                    let ch = if shift_down {
+                        keyboard::shift_char(ch)
+                    } else {
+                        ch
+                    };
+                    editor.put_char(display, style, ch);
+                }
+
+                repeat_countdown = REPEAT_INTERVAL_TICKS;
+                acted = true;
+            }
+        }
+
+        // 入力があった直後はカーソルを点灯状態にして即座に見せる。
+        if acted {
+            blink_on = true;
+            blink_ticks = 0;
+        }
+
+        // 点滅の位相を進める。
+        blink_ticks += 1;
+        if blink_ticks >= BLINK_TICKS {
+            blink_ticks = 0;
+            blink_on = !blink_on;
+        }
+
+        // 点灯位相ならカーソルを描画する。
+        if blink_on {
+            editor.fill_cursor(display, Rgb565::WHITE);
+            cursor_shown = true;
+        }
+
+        // executor に処理を譲り、ネットワークタスクを動かし続ける。
+        embassy_time::Timer::after_millis(20).await;
+    }
+}

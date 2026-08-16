@@ -9,12 +9,10 @@
 use embedded_graphics::{
     pixelcolor::Rgb565,
     prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
-    text::Text,
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
 
-use cardputer_rust::{config, keyboard, net, ui, wifi};
+use cardputer_rust::{config, net, terminal, ui, wifi};
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -164,17 +162,8 @@ async fn main(_spawner: Spawner) {
 
     info!("LCD initialized");
 
-    // 起動直後に前回の残像（GRAM に残る内容）を消し、
-    // 通信中であることを表示しておく。
+    // 起動直後に前回の残像（GRAM に残る内容）を消しておく。
     display.clear(Rgb565::BLACK).unwrap();
-
-    Text::new(
-        "Connecting...",
-        Point::new(20, 70),
-        style,
-    )
-    .draw(&mut display)
-    .unwrap();
 
     // キーボード (TCA8418) を I2C0 で初期化。
     // SDA = GPIO8, SCL = GPIO9
@@ -221,45 +210,71 @@ async fn main(_spawner: Spawner) {
     }
     */
 
-    info!("Connecting to {}...", config::WIFI_SSID);
+    // ---- Wi-Fi 接続（リトライ付き）----
+    const WIFI_MAX_RETRIES: u32 = 5;
 
-    match wifi_controller.connect_async().await {
-        Ok(info) => {
-            info!("Wi-Fi connected!");
-            info!("AP info: {:?}", info);
+    let mut connected = false;
 
-            let wifi_device = interfaces.station;
+    for attempt in 1..=WIFI_MAX_RETRIES {
+        info!(
+            "Connecting to {} ({}/{})...",
+            config::WIFI_SSID,
+            attempt,
+            WIFI_MAX_RETRIES
+        );
+        let _ = ui::show_message(&mut display, style, "Connecting...");
 
-            // DHCPを使うIPv4ネットワークスタック
-            let net_config =
-                embassy_net::Config::dhcpv4(Default::default());
+        match wifi_controller.connect_async().await {
+            Ok(ap_info) => {
+                info!("Wi-Fi connected! AP info: {:?}", ap_info);
+                connected = true;
+                break;
+            }
+            Err(e) => {
+                info!("Wi-Fi connection failed: {:?}", e);
+                let _ = ui::show_message(&mut display, style, "WiFi retry...");
+                embassy_time::Timer::after_secs(2).await;
+            }
+        }
+    }
 
-            // DHCP用を含めてソケット領域を確保
-            let mut resources =
-                embassy_net::StackResources::<3>::new();
+    if connected {
+        let wifi_device = interfaces.station;
 
-            let (stack, mut runner) = embassy_net::new(
-                wifi_device,
-                net_config,
-                &mut resources,
-                0x1234_5678,
-            );
+        // DHCPを使うIPv4ネットワークスタック
+        let net_config = embassy_net::Config::dhcpv4(Default::default());
+        let mut resources = embassy_net::StackResources::<3>::new();
 
-            info!("DHCP starting...");
+        let (stack, mut runner) = embassy_net::new(
+            wifi_device,
+            net_config,
+            &mut resources,
+            0x1234_5678,
+        );
 
-            embassy_futures::join::join(
-                runner.run(),
-                async {
-                    // DHCPでIPv4設定が取れるまで待つ
-                    stack.wait_config_up().await;
+        info!("DHCP starting...");
 
+        // runner.run()（ネットワーク駆動）と、HTTP→キーボードの処理を
+        // 同じ executor 上で並行に走らせる。runner は戻らないので join で常駐。
+        embassy_futures::join::join(runner.run(), async {
+            // DHCP はハングしないようタイムアウト付きで待つ。
+            const DHCP_TIMEOUT_SECS: u64 = 15;
+
+            let dhcp = embassy_futures::select::select(
+                stack.wait_config_up(),
+                embassy_time::Timer::after_secs(DHCP_TIMEOUT_SECS),
+            )
+            .await;
+
+            match dhcp {
+                embassy_futures::select::Either::First(()) => {
                     info!("DHCP completed!");
 
-                    if let Some(config) = stack.config_v4() {
-                        info!("IPv4 config: {:?}", config);
+                    if let Some(cfg) = stack.config_v4() {
+                        info!("IPv4 config: {:?}", cfg);
                     }
 
-                    // TCP送受信バッファ
+                    // HTTP GET（best-effort: 失敗しても panic せず表示するだけ）
                     let mut rx_buffer = [0u8; 2048];
                     let mut tx_buffer = [0u8; 1024];
 
@@ -269,16 +284,6 @@ async fn main(_spawner: Spawner) {
                         &mut tx_buffer,
                     );
 
-                    info!("Connecting to Mac...");
-
-                    socket
-                        .connect((config::SERVER_IP, config::SERVER_PORT))
-                        .await
-                        .unwrap();
-
-                    info!("Connected to Mac");
-
-                    // HTTP GETを送信
                     let mut request_buf = [0u8; 128];
                     let request = net::write_get_request(
                         &mut request_buf,
@@ -286,171 +291,62 @@ async fn main(_spawner: Spawner) {
                         config::SERVER_HOST,
                     );
 
-                    socket.write(request).await.unwrap();
-                    socket.flush().await.unwrap();
-
-                    info!("HTTP request sent");
-
-                    // レスポンスを読む
-                    let mut read_buffer = [0u8; 512];
                     let mut response = [0u8; 2048];
-                    let mut response_len = 0;
 
-                    loop {
-                        let n = socket.read(&mut read_buffer).await.unwrap();
+                    info!("HTTP GET {}", config::REQUEST_PATH);
 
-                        if n == 0 {
-                            break;
-                        }
+                    match net::http_get(
+                        &mut socket,
+                        config::SERVER_IP,
+                        config::SERVER_PORT,
+                        request,
+                        &mut response,
+                    )
+                    .await
+                    {
+                        Ok(len) => {
+                            let body = net::extract_body(&response[..len]);
 
-                        let remaining = response.len() - response_len;
-                        let copy_len = core::cmp::min(n, remaining);
-
-                        response[response_len..response_len + copy_len]
-                            .copy_from_slice(&read_buffer[..copy_len]);
-
-                        response_len += copy_len;
-
-                        if response_len == response.len() {
-                            break;
-                        }
-                    }
-
-                    let response_bytes = &response[..response_len];
-
-                    let body = net::extract_body(response_bytes);
-
-                    if let Ok(text) = core::str::from_utf8(body) {
-                        let text = text.trim();
-
-                        info!("HTTP body: {}", text);
-
-                        display.clear(Rgb565::BLACK).unwrap();
-
-                        Text::new(
-                            text,
-                            Point::new(20, 70),
-                            style,
-                        )
-                        .draw(&mut display)
-                        .unwrap();
-                    }
-
-                    info!("HTTP complete");
-
-                    // ---- キーボード入力ループ（ネットワークと共存）----
-                    // レイアウト定数（画面: 240x135, FONT_10X20）
-                    const CHAR_W: i32 = 10;
-                    const CHAR_H: i32 = 20;
-                    const LEFT: i32 = 10;
-                    const RIGHT: i32 = 230;
-                    const TOP: i32 = 40;
-
-                    let mut cursor_x = LEFT;
-                    let mut cursor_y = TOP;
-                    let mut shift_down = false;
-
-                    info!("Keyboard ready");
-
-                    loop {
-                        for event in keypad.events().unwrap() {
-                            if let Some(key) = event.pressed_keypad() {
-                                let (row, col) =
-                                    keyboard::remap_key(key.row, key.col);
-
-                                match (row, col) {
-                                    // Shift
-                                    (2, 1) => shift_down = true,
-
-                                    // Backspace: 直前のセルを黒で塗って消す
-                                    (0, 13) => {
-                                        if cursor_x > LEFT {
-                                            cursor_x -= CHAR_W;
-
-                                            Rectangle::new(
-                                                Point::new(
-                                                    cursor_x,
-                                                    cursor_y - CHAR_H + 4,
-                                                ),
-                                                Size::new(
-                                                    CHAR_W as u32,
-                                                    CHAR_H as u32,
-                                                ),
-                                            )
-                                            .into_styled(
-                                                PrimitiveStyle::with_fill(
-                                                    Rgb565::BLACK,
-                                                ),
-                                            )
-                                            .draw(&mut display)
-                                            .unwrap();
-                                        }
-                                    }
-
-                                    // Enter: 改行
-                                    (2, 13) => {
-                                        cursor_x = LEFT;
-                                        cursor_y += CHAR_H;
-                                    }
-
-                                    // 修飾キー (Tab/FN/Ctrl/Opt/Alt) は無視
-                                    (1, 0) | (2, 0) | (3, 0) | (3, 1)
-                                    | (3, 2) => {}
-
-                                    // 通常キー: 文字を描画
-                                    _ => {
-                                        if let Some(ch) = keyboard::key_to_char(
-                                            key.row, key.col,
-                                        ) {
-                                            let ch = if shift_down {
-                                                keyboard::shift_char(ch)
-                                            } else {
-                                                ch
-                                            };
-
-                                            let mut buf = [0u8; 4];
-                                            let s = ch.encode_utf8(&mut buf);
-
-                                            Text::new(
-                                                s,
-                                                Point::new(cursor_x, cursor_y),
-                                                style,
-                                            )
-                                            .draw(&mut display)
-                                            .unwrap();
-
-                                            cursor_x += CHAR_W;
-
-                                            // 右端で自動改行
-                                            if cursor_x > RIGHT - CHAR_W {
-                                                cursor_x = LEFT;
-                                                cursor_y += CHAR_H;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            if let Some(key) = event.released_keypad() {
-                                let (row, col) =
-                                    keyboard::remap_key(key.row, key.col);
-
-                                if (row, col) == (2, 1) {
-                                    shift_down = false;
-                                }
+                            if let Ok(text) = core::str::from_utf8(body) {
+                                let text = text.trim();
+                                info!("HTTP body: {}", text);
+                                let _ =
+                                    ui::show_message(&mut display, style, text);
+                            } else {
+                                let _ = ui::show_message(
+                                    &mut display,
+                                    style,
+                                    "Bad response",
+                                );
                             }
                         }
-
-                        // executor に処理を譲り、
-                        // 裏で runner.run()（ネットワーク）を動かし続ける。
-                        embassy_time::Timer::after_millis(20).await;
+                        Err(e) => {
+                            info!("HTTP failed: {:?}", e);
+                            let _ = ui::show_message(
+                                &mut display,
+                                style,
+                                "Server error",
+                            );
+                        }
                     }
-                },
-            )
-            .await;
-        }
-        Err(e) => {
-            info!("Wi-Fi connection failed: {:?}", e);
-        }
+                }
+                embassy_futures::select::Either::Second(()) => {
+                    info!("DHCP timed out");
+                    let _ =
+                        ui::show_message(&mut display, style, "DHCP timeout");
+                }
+            }
+
+            info!("Entering keyboard loop");
+
+            // ネットワークを生かしたままキーボード入力へ。
+            terminal::run_input(&mut display, &mut keypad, style).await;
+        })
+        .await;
+    } else {
+        // Wi-Fi に接続できなかった → オフラインでキーボードのみ動かす。
+        info!("Wi-Fi unavailable; running offline");
+        let _ = ui::show_message(&mut display, style, "Offline");
+        terminal::run_input(&mut display, &mut keypad, style).await;
     }
 }
