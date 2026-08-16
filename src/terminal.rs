@@ -21,6 +21,7 @@ use embedded_graphics::{
     text::Text,
 };
 use embedded_hal::i2c::I2c;
+use esp_hal::system::software_reset;
 use esp_radio::wifi::WifiController;
 use tca8418::Tca8418;
 
@@ -326,6 +327,9 @@ pub async fn run_input<D, I>(
                                 if fn_down && base == 'w' {
                                     scan_requested = true;
                                     held = None;
+                                } else if fn_down && base == 'r' {
+                                    // Fn+R でソフトリセット（戻らない）。
+                                    software_reset();
                                 } else {
                                     let ch = if shift_down {
                                         keyboard::shift_char(base)
