@@ -2,6 +2,10 @@
 
 use core::fmt::Write;
 
+use embassy_net::{
+    Ipv4Address,
+    Ipv4Cidr,
+};
 use embedded_graphics::{
     mono_font::{
         MonoTextStyle,
@@ -68,6 +72,42 @@ where
 {
     display.clear(Rgb565::BLACK)?;
     Text::new(text, MESSAGE_ORIGIN, style).draw(display)?;
+    Ok(())
+}
+
+/// IPv4 アドレスとゲートウェイを表示する。
+pub fn show_ip<D>(
+    display: &mut D,
+    style: MonoTextStyle<'_, Rgb565>,
+    cidr: Ipv4Cidr,
+    gateway: Option<Ipv4Address>,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    display.clear(Rgb565::BLACK)?;
+
+    let mut ip_line = LineBuf::new();
+    let _ = write!(ip_line, "IP: {}/{}", cidr.address(), cidr.prefix_len());
+    Text::new(ip_line.as_str(), Point::new(LIST_LEFT, LIST_TOP), style)
+        .draw(display)?;
+
+    let mut gw_line = LineBuf::new();
+    match gateway {
+        Some(gw) => {
+            let _ = write!(gw_line, "GW: {}", gw);
+        }
+        None => {
+            let _ = write!(gw_line, "GW: -");
+        }
+    }
+    Text::new(
+        gw_line.as_str(),
+        Point::new(LIST_LEFT, LIST_TOP + LIST_LINE_H),
+        style,
+    )
+    .draw(display)?;
+
     Ok(())
 }
 

@@ -280,6 +280,7 @@ pub async fn run_input<D, I>(
         let mut acted = false;
         let mut send_requested = false;
         let mut scan_requested = false;
+        let mut ip_requested = false;
 
         // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
         if let Ok(events) = keypad.events() {
@@ -326,6 +327,9 @@ pub async fn run_input<D, I>(
                             {
                                 if fn_down && base == 'w' {
                                     scan_requested = true;
+                                    held = None;
+                                } else if fn_down && base == 'i' {
+                                    ip_requested = true;
                                     held = None;
                                 } else if fn_down && base == 'r' {
                                     // Fn+R でソフトリセット（戻らない）。
@@ -376,6 +380,22 @@ pub async fn run_input<D, I>(
             }
 
             // 画面を一覧で上書きしたので入力状態をリセットする。
+            editor.reset();
+            cursor_shown = false;
+            acted = true;
+        }
+
+        // Fn+I による IP アドレス表示。
+        if ip_requested {
+            match stack.and_then(|s| s.config_v4()) {
+                Some(cfg) => {
+                    let _ = ui::show_ip(display, style, cfg.address, cfg.gateway);
+                }
+                None => {
+                    let _ = ui::show_message(display, style, "No IP");
+                }
+            }
+
             editor.reset();
             cursor_shown = false;
             acted = true;
