@@ -21,9 +21,10 @@ use embedded_graphics::{
     text::Text,
 };
 use embedded_hal::i2c::I2c;
+use esp_radio::wifi::WifiController;
 use tca8418::Tca8418;
 
-use crate::{config, keyboard, net, ui};
+use crate::{config, keyboard, net, ui, wifi};
 
 // レイアウト定数（画面 240x135, FONT_10X20）
 const CHAR_W: i32 = 10;
@@ -241,12 +242,14 @@ async fn send_message<D>(
 ///
 /// `stack` が `Some` のときは Enter で入力を POST 送信し、応答を表示する。
 /// `None`（オフライン）のときは Enter は改行になる。
+/// Fn + W でアクセスポイント一覧を表示する（`controller` を使用）。
 /// 表示エラーは無視して継続する（端末を落とさないため）。
 pub async fn run_input<D, I>(
     display: &mut D,
     keypad: &mut Tca8418<I>,
     style: MonoTextStyle<'_, Rgb565>,
     stack: Option<Stack<'_>>,
+    controller: &mut WifiController<'_>,
 ) where
     D: DrawTarget<Color = Rgb565>,
     I: I2c,
@@ -275,6 +278,7 @@ pub async fn run_input<D, I>(
 
         let mut acted = false;
         let mut send_requested = false;
+        let mut scan_requested = false;
 
         // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
         if let Ok(events) = keypad.events() {
@@ -314,20 +318,25 @@ pub async fn run_input<D, I>(
                         // その他の修飾キー (Tab/Ctrl/Opt/Alt) は無視
                         (1, 0) | (3, 0) | (3, 1) | (3, 2) => {}
 
-                        // 通常キー: 文字を描画（リピート対象）
+                        // 通常キー: Fn+W は AP 一覧、それ以外は文字入力
                         _ => {
-                            if let Some(ch) =
+                            if let Some(base) =
                                 keyboard::key_to_char(key.row, key.col)
                             {
-                                let ch = if shift_down {
-                                    keyboard::shift_char(ch)
+                                if fn_down && base == 'w' {
+                                    scan_requested = true;
+                                    held = None;
                                 } else {
-                                    ch
-                                };
-                                editor.put_char(display, style, ch);
-                                held = Some((key.row, key.col));
-                                repeat_countdown = REPEAT_DELAY_TICKS;
-                                acted = true;
+                                    let ch = if shift_down {
+                                        keyboard::shift_char(base)
+                                    } else {
+                                        base
+                                    };
+                                    editor.put_char(display, style, ch);
+                                    held = Some((key.row, key.col));
+                                    repeat_countdown = REPEAT_DELAY_TICKS;
+                                    acted = true;
+                                }
                             }
                         }
                     }
@@ -347,6 +356,25 @@ pub async fn run_input<D, I>(
                     }
                 }
             }
+        }
+
+        // Fn+W による AP 一覧表示（反復子を手放してから await する）。
+        if scan_requested {
+            let _ = ui::show_message(display, style, "Scanning...");
+
+            match wifi::scan(controller, 6).await {
+                Ok(aps) => {
+                    let _ = ui::show_ap_list(display, style, &aps);
+                }
+                Err(_) => {
+                    let _ = ui::show_message(display, style, "Scan failed");
+                }
+            }
+
+            // 画面を一覧で上書きしたので入力状態をリセットする。
+            editor.reset();
+            cursor_shown = false;
+            acted = true;
         }
 
         // Enter による送信（イベントの反復子を手放してから await する）。

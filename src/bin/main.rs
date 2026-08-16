@@ -340,15 +340,41 @@ async fn main(_spawner: Spawner) {
             info!("Entering keyboard loop");
 
             // ネットワークを生かしたままキーボード入力へ。
-            // Enter で入力を送信できるよう stack を渡す。
-            terminal::run_input(&mut display, &mut keypad, style, Some(stack))
-                .await;
+            // Enter で送信、Fn+W で AP 一覧が出せるよう stack と controller を渡す。
+            terminal::run_input(
+                &mut display,
+                &mut keypad,
+                style,
+                Some(stack),
+                &mut wifi_controller,
+            )
+            .await;
         })
         .await;
     } else {
-        // Wi-Fi に接続できなかった → オフラインでキーボードのみ動かす。
-        info!("Wi-Fi unavailable; running offline");
-        let _ = ui::show_message(&mut display, style, "Offline");
-        terminal::run_input(&mut display, &mut keypad, style, None).await;
+        // Wi-Fi に接続できなかった → AP 一覧を出してオフラインへ。
+        info!("Wi-Fi unavailable; scanning for APs...");
+        let _ = ui::show_message(&mut display, style, "Scanning...");
+
+        match wifi::scan(&mut wifi_controller, 6).await {
+            Ok(aps) => {
+                info!("Found {} APs", aps.len());
+                let _ = ui::show_ap_list(&mut display, style, &aps);
+            }
+            Err(e) => {
+                info!("Scan failed: {:?}", e);
+                let _ = ui::show_message(&mut display, style, "Scan failed");
+            }
+        }
+
+        // オフラインでもキーボードは使える（Fn+W で再スキャン可）。
+        terminal::run_input(
+            &mut display,
+            &mut keypad,
+            style,
+            None,
+            &mut wifi_controller,
+        )
+        .await;
     }
 }

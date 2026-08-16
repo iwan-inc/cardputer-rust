@@ -1,8 +1,14 @@
-//! Wi-Fi (STA) の接続設定ビルダ。
+//! Wi-Fi (STA) の接続設定ビルダとスキャン。
+
+use alloc::vec::Vec;
 
 use esp_radio::wifi::{
     Config as WifiConfig,
     ControllerConfig,
+    WifiController,
+    WifiError,
+    ap::AccessPointInfo,
+    scan::ScanConfig,
     sta::StationConfig,
 };
 
@@ -15,4 +21,13 @@ pub fn controller_config(ssid: &str, password: &str) -> ControllerConfig {
     );
 
     ControllerConfig::default().with_initial_config(station_config)
+}
+
+/// 周囲のアクセスポイントをスキャンし、最大 `max` 件を返す。
+pub async fn scan(
+    controller: &mut WifiController<'_>,
+    max: usize,
+) -> Result<Vec<AccessPointInfo>, WifiError> {
+    let config = ScanConfig::default().with_max(max);
+    controller.scan_async(&config).await
 }
