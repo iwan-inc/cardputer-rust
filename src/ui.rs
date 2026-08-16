@@ -13,6 +13,7 @@ use embedded_graphics::{
     },
     pixelcolor::Rgb565,
     prelude::*,
+    primitives::Rectangle,
     text::Text,
 };
 use esp_radio::wifi::ap::AccessPointInfo;
@@ -73,6 +74,40 @@ where
     display.clear(Rgb565::BLACK)?;
     Text::new(text, MESSAGE_ORIGIN, style).draw(display)?;
     Ok(())
+}
+
+/// 1bit モノクロのビットマップを画面に転送する。
+///
+/// `data` は行優先・MSB 先頭・各行は 1 バイト境界にパディング（Pillow の
+/// mode "1" の `tobytes()` と同じ並び）。ビット 1 = 白, 0 = 黒。
+/// `data` が短い箇所は黒で埋める（panic しない）。
+pub fn draw_image_1bpp<D>(
+    display: &mut D,
+    data: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let bytes_per_row = (width as usize + 7) / 8;
+    let area = Rectangle::new(Point::zero(), Size::new(width, height));
+
+    display.fill_contiguous(
+        &area,
+        (0..width * height).map(|i| {
+            let x = (i % width) as usize;
+            let y = (i / width) as usize;
+            let byte = data.get(y * bytes_per_row + x / 8).copied().unwrap_or(0);
+            let bit = (byte >> (7 - (x % 8))) & 1;
+
+            if bit == 1 {
+                Rgb565::WHITE
+            } else {
+                Rgb565::BLACK
+            }
+        }),
+    )
 }
 
 /// IPv4 アドレスとゲートウェイを表示する。

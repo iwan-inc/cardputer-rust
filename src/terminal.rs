@@ -38,6 +38,13 @@ const MAX_LINES: usize = 6;
 /// 送信メッセージ（現在の入力）の最大バイト数。
 const MSG_CAP: usize = 128;
 
+// 画面（LCD）の解像度。サーバの画像サイズと一致させること。
+const SCREEN_W: u32 = 240;
+const SCREEN_H: u32 = 135;
+/// 応答（1bit 画像 + HTTP ヘッダ）用の受信バッファ容量。
+/// 240x135/8 = 4050 バイト + ヘッダに余裕を持たせる。
+const RESPONSE_CAP: usize = 6144;
+
 // キーリピートのタイミング（1 周回 = 約 20ms）
 /// 押してから最初のリピートまでの周回数（約 400ms）。
 const REPEAT_DELAY_TICKS: u32 = 20;
@@ -81,6 +88,14 @@ impl Editor {
         self.line = 0;
         self.line_end = [LEFT; MAX_LINES];
         self.buf_len = 0;
+    }
+
+    /// 画面はそのままに、カーソルを最下行へ移す（受信内容や一覧は上部に
+    /// 出るため、カーソルが重ならないようにする）。
+    fn reset_to_bottom(&mut self) {
+        self.reset();
+        self.line = MAX_LINES - 1;
+        self.cursor_y = TOP + (MAX_LINES as i32 - 1) * CHAR_H;
     }
 
     /// 次の行へ移動する。最終行では折り返さず先頭に戻る（簡易）。
@@ -208,13 +223,15 @@ async fn send_message<D>(
     let mut rx = [0u8; 1024];
     let mut tx = [0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
-    let mut response = [0u8; 512];
+
+    // 応答は ~4KB の画像になるためヒープに確保する。
+    let mut response = alloc::vec![0u8; RESPONSE_CAP];
 
     let result = net::http_post(
         &mut socket,
         config::SERVER_IP,
         config::SERVER_PORT,
-        config::POST_PATH,
+        config::RENDER_PATH,
         config::SERVER_HOST,
         editor.message(),
         &mut response,
@@ -223,20 +240,17 @@ async fn send_message<D>(
 
     match result {
         Ok(len) => {
+            // 応答本文（1bit 画像）をそのまま画面に転送する。
             let body = net::extract_body(&response[..len]);
-
-            if let Ok(text) = core::str::from_utf8(body) {
-                let _ = ui::show_message(display, style, text.trim());
-            } else {
-                let _ = ui::show_message(display, style, "Bad reply");
-            }
+            let _ = ui::draw_image_1bpp(display, body, SCREEN_W, SCREEN_H);
         }
         Err(_) => {
             let _ = ui::show_message(display, style, "Send error");
         }
     }
 
-    editor.reset();
+    // 受信内容は上部に出るので、カーソルは最下行へ。
+    editor.reset_to_bottom();
 }
 
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
@@ -379,8 +393,8 @@ pub async fn run_input<D, I>(
                 }
             }
 
-            // 画面を一覧で上書きしたので入力状態をリセットする。
-            editor.reset();
+            // 一覧は上部に出るので、カーソルは最下行へ。
+            editor.reset_to_bottom();
             cursor_shown = false;
             acted = true;
         }
@@ -396,7 +410,8 @@ pub async fn run_input<D, I>(
                 }
             }
 
-            editor.reset();
+            // IP 表示は上部に出るので、カーソルは最下行へ。
+            editor.reset_to_bottom();
             cursor_shown = false;
             acted = true;
         }
