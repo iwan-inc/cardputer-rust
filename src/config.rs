@@ -25,3 +25,6 @@ pub const SERVER_HOST: &str = "192.168.10.53:18080";
 
 /// GET で取得するパス。
 pub const REQUEST_PATH: &str = "/hello.txt";
+
+/// 入力文字列を POST 送信するパス。
+pub const POST_PATH: &str = "/msg";

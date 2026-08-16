@@ -9,6 +9,10 @@
 //! - 行をまたぐ Backspace（行頭で押すと前行末尾を削除）
 //! - Fn + Backspace で全消去（先頭行へ）
 
+use embassy_net::{
+    Stack,
+    tcp::TcpSocket,
+};
 use embedded_graphics::{
     mono_font::MonoTextStyle,
     pixelcolor::Rgb565,
@@ -19,7 +23,7 @@ use embedded_graphics::{
 use embedded_hal::i2c::I2c;
 use tca8418::Tca8418;
 
-use crate::keyboard;
+use crate::{config, keyboard, net, ui};
 
 // レイアウト定数（画面 240x135, FONT_10X20）
 const CHAR_W: i32 = 10;
@@ -29,6 +33,8 @@ const RIGHT: i32 = 230;
 const TOP: i32 = 20;
 /// 画面に収まる行数（y = TOP + 行*CHAR_H）。
 const MAX_LINES: usize = 6;
+/// 送信メッセージ（現在の入力）の最大バイト数。
+const MSG_CAP: usize = 128;
 
 // キーリピートのタイミング（1 周回 = 約 20ms）
 /// 押してから最初のリピートまでの周回数（約 400ms）。
@@ -36,7 +42,7 @@ const REPEAT_DELAY_TICKS: u32 = 20;
 /// リピート間隔の周回数（約 80ms）。
 const REPEAT_INTERVAL_TICKS: u32 = 4;
 
-/// カーソル位置と各行の終端 x を管理する簡易テキスト状態。
+/// カーソル位置と各行の終端 x、および送信用の入力バッファを管理する。
 struct Editor {
     cursor_x: i32,
     cursor_y: i32,
@@ -44,6 +50,9 @@ struct Editor {
     line: usize,
     /// 各行の「次に文字を置く x」（＝入力済みの終端）。
     line_end: [i32; MAX_LINES],
+    /// 送信するメッセージ（前回 Enter/クリア以降に打った文字）。
+    buf: [u8; MSG_CAP],
+    buf_len: usize,
 }
 
 impl Editor {
@@ -53,7 +62,23 @@ impl Editor {
             cursor_y: TOP,
             line: 0,
             line_end: [LEFT; MAX_LINES],
+            buf: [0u8; MSG_CAP],
+            buf_len: 0,
         }
+    }
+
+    /// 現在の入力メッセージ。
+    fn message(&self) -> &[u8] {
+        &self.buf[..self.buf_len]
+    }
+
+    /// 画面はそのままに、カーソルと入力バッファを初期状態へ戻す。
+    fn reset(&mut self) {
+        self.cursor_x = LEFT;
+        self.cursor_y = TOP;
+        self.line = 0;
+        self.line_end = [LEFT; MAX_LINES];
+        self.buf_len = 0;
     }
 
     /// 次の行へ移動する。最終行では折り返さず先頭に戻る（簡易）。
@@ -81,6 +106,12 @@ impl Editor {
         let _ = Text::new(s, Point::new(self.cursor_x, self.cursor_y), style)
             .draw(display);
 
+        // 送信バッファへ追記（ASCII のみ、あふれたら無視）。
+        if ch.is_ascii() && self.buf_len < MSG_CAP {
+            self.buf[self.buf_len] = ch as u8;
+            self.buf_len += 1;
+        }
+
         self.cursor_x += CHAR_W;
         self.line_end[self.line] = self.cursor_x;
 
@@ -89,10 +120,11 @@ impl Editor {
         }
     }
 
-    /// 改行する。
+    /// 改行する。入力バッファも新しい行としてリセットする。
     fn newline(&mut self) {
         self.line_end[self.line] = self.cursor_x;
         self.advance_line();
+        self.buf_len = 0;
     }
 
     /// 指定セルを黒で塗ってカーソルをそこへ置く。
@@ -115,6 +147,11 @@ impl Editor {
     where
         D: DrawTarget<Color = Rgb565>,
     {
+        // 送信バッファからも 1 文字取り除く。
+        if self.buf_len > 0 {
+            self.buf_len -= 1;
+        }
+
         if self.cursor_x > LEFT {
             self.cursor_x -= CHAR_W;
             self.erase_cell(display);
@@ -138,10 +175,7 @@ impl Editor {
         D: DrawTarget<Color = Rgb565>,
     {
         let _ = display.clear(Rgb565::BLACK);
-        self.cursor_x = LEFT;
-        self.cursor_y = TOP;
-        self.line = 0;
-        self.line_end = [LEFT; MAX_LINES];
+        self.reset();
     }
 
     /// カーソル位置のアンダーラインを指定色で塗る。
@@ -160,13 +194,59 @@ impl Editor {
     }
 }
 
+/// 現在の入力を POST 送信し、応答を画面に表示してからエディタをリセットする。
+async fn send_message<D>(
+    editor: &mut Editor,
+    display: &mut D,
+    style: MonoTextStyle<'_, Rgb565>,
+    stack: Stack<'_>,
+) where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let mut rx = [0u8; 1024];
+    let mut tx = [0u8; 512];
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+    let mut response = [0u8; 512];
+
+    let result = net::http_post(
+        &mut socket,
+        config::SERVER_IP,
+        config::SERVER_PORT,
+        config::POST_PATH,
+        config::SERVER_HOST,
+        editor.message(),
+        &mut response,
+    )
+    .await;
+
+    match result {
+        Ok(len) => {
+            let body = net::extract_body(&response[..len]);
+
+            if let Ok(text) = core::str::from_utf8(body) {
+                let _ = ui::show_message(display, style, text.trim());
+            } else {
+                let _ = ui::show_message(display, style, "Bad reply");
+            }
+        }
+        Err(_) => {
+            let _ = ui::show_message(display, style, "Send error");
+        }
+    }
+
+    editor.reset();
+}
+
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
 ///
+/// `stack` が `Some` のときは Enter で入力を POST 送信し、応答を表示する。
+/// `None`（オフライン）のときは Enter は改行になる。
 /// 表示エラーは無視して継続する（端末を落とさないため）。
 pub async fn run_input<D, I>(
     display: &mut D,
     keypad: &mut Tca8418<I>,
     style: MonoTextStyle<'_, Rgb565>,
+    stack: Option<Stack<'_>>,
 ) where
     D: DrawTarget<Color = Rgb565>,
     I: I2c,
@@ -194,6 +274,7 @@ pub async fn run_input<D, I>(
         }
 
         let mut acted = false;
+        let mut send_requested = false;
 
         // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
         if let Ok(events) = keypad.events() {
@@ -219,11 +300,15 @@ pub async fn run_input<D, I>(
                             acted = true;
                         }
 
-                        // Enter（リピート対象外）
+                        // Enter: オンラインなら送信、オフラインなら改行
                         (2, 13) => {
-                            editor.newline();
+                            if stack.is_some() {
+                                send_requested = true;
+                            } else {
+                                editor.newline();
+                                acted = true;
+                            }
                             held = None;
-                            acted = true;
                         }
 
                         // その他の修飾キー (Tab/Ctrl/Opt/Alt) は無視
@@ -261,6 +346,15 @@ pub async fn run_input<D, I>(
                         }
                     }
                 }
+            }
+        }
+
+        // Enter による送信（イベントの反復子を手放してから await する）。
+        if send_requested {
+            if let Some(stack) = stack {
+                send_message(&mut editor, display, style, stack).await;
+                cursor_shown = false;
+                acted = true;
             }
         }
 

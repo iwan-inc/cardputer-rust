@@ -340,13 +340,15 @@ async fn main(_spawner: Spawner) {
             info!("Entering keyboard loop");
 
             // ネットワークを生かしたままキーボード入力へ。
-            terminal::run_input(&mut display, &mut keypad, style).await;
+            // Enter で入力を送信できるよう stack を渡す。
+            terminal::run_input(&mut display, &mut keypad, style, Some(stack))
+                .await;
         })
         .await;
     } else {
         // Wi-Fi に接続できなかった → オフラインでキーボードのみ動かす。
         info!("Wi-Fi unavailable; running offline");
         let _ = ui::show_message(&mut display, style, "Offline");
-        terminal::run_input(&mut display, &mut keypad, style).await;
+        terminal::run_input(&mut display, &mut keypad, style, None).await;
     }
 }
