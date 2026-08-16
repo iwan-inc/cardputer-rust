@@ -160,6 +160,18 @@ async fn main(_spawner: Spawner) {
 
     info!("LCD initialized");
 
+    // 起動直後に前回の残像（GRAM に残る内容）を消し、
+    // 通信中であることを表示しておく。
+    display.clear(Rgb565::BLACK).unwrap();
+
+    Text::new(
+        "Connecting...",
+        Point::new(20, 70),
+        style,
+    )
+    .draw(&mut display)
+    .unwrap();
+
     /*
     info!("Scanning Wi-Fi...");
 
