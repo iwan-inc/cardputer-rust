@@ -199,11 +199,17 @@ def cmd_ai(arg):
     if not os.environ.get("ANTHROPIC_API_KEY"):
         return "APIキー未設定\nANTHROPIC_API_KEY を\n設定してください"
 
+    now = datetime.now()
+    wd = WEEKDAYS_JA[now.weekday()]
+    today = now.strftime(f"%Y年%m月%d日（{wd}）%H:%M")
+
     client = _get_anthropic()
     resp = client.messages.create(
         model="claude-opus-4-8",
         max_tokens=512,
         system=(
+            f"現在の日時は {today}（サーバのローカル時刻）。"
+            "日付や時刻に関する質問にはこれを基準に答える。"
             "あなたはカードサイズの小型端末のアシスタント。"
             "回答は必ず日本語で、要点のみ簡潔に（およそ4行以内、"
             "各行20文字程度）。前置き・言い訳・繰り返しはしない。"
