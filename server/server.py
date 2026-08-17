@@ -594,5 +594,11 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     print(f"Serving on 0.0.0.0:{PORT} (GET: files, POST /render: image)")
     print(f"Font: {FONT.path if hasattr(FONT, 'path') else 'default'}")
+    # Whisper を起動時にロードしておき、初回 /ask のモデルロード待ち
+    # （STT に数秒上乗せ）を無くす。
+    try:
+        _get_whisper()
+    except Exception as e:
+        print(f"Whisper preload skipped: {e}", flush=True)
     # 0.0.0.0 で LAN 上のデバイスから到達可能にする。
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
