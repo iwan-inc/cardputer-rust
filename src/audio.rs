@@ -18,8 +18,9 @@ pub const SAMPLE_RATE: u32 = 16000;
 pub const RECORD_SECS: usize = 3;
 /// 録音の最大サンプル数（録音の上限）。
 pub const MAX_SAMPLES: usize = SAMPLE_RATE as usize * RECORD_SECS;
-/// バッファ全体のサンプル数（録音と再生ダウンロードで共用、再生は最大5秒）。
-pub const BUF_SAMPLES: usize = SAMPLE_RATE as usize * 5;
+/// バッファ全体のサンプル数（録音と再生ダウンロードで共用、再生は最大6秒）。
+/// 内部 RAM 制約でこれが上限付近（8秒はリンク時に DRAM 超過）。
+pub const BUF_SAMPLES: usize = SAMPLE_RATE as usize * 6;
 
 /// 1 回の DMA で扱うサンプル数（<= 4096 バイト = 1024 語）。
 const CHUNK: usize = 1024;
@@ -79,7 +80,7 @@ pub async fn play_tone(i2s_tx: &mut I2sTx<'_, Async>, freq_hz: u32, ms: u32) {
 }
 
 /// ダウンロードした回答音声を置くバッファ（録音バッファを再利用）。
-/// 上限 = MAX_SAMPLES*2 バイト（16kHz で RECORD_SECS 秒）。
+/// 上限 = BUF_SAMPLES*2 バイト（16kHz で 6 秒）。
 pub fn dl_buf() -> &'static mut [u8] {
     // SAFETY: 単一タスクからのみアクセス。録音済みデータは送信後なので上書き可。
     unsafe {

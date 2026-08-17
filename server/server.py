@@ -248,9 +248,9 @@ def cmd_ai(arg):
             f"現在の日時は {today}（サーバのローカル時刻）。"
             "日付や時刻に関する質問にはこれを基準に答える。"
             "あなたはカードサイズの小型端末の音声アシスタント。"
-            "回答は必ず日本語で、1〜2文・全体でおよそ40文字以内に収める"
-            "（音声で読み上げるため簡潔に）。前置き・言い訳・繰り返しはしない。"
-            "最終的な答えだけを書く。"
+            "回答は必ず日本語で、2〜3文・全体でおよそ60文字以内に収める"
+            "（音声で読み上げるため簡潔に。必要なら一言の補足はよいが冗長にしない）。"
+            "前置き・言い訳・繰り返しはしない。最終的な答えだけを書く。"
             "\n出力は必ず次の2行構成にする:"
             "\n1行目: 表示用の回答（通常の漢字かな交じり）。"
             "\n2行目: 『よみ:』に続けて、1行目の全文の読みをひらがなで書く"
@@ -393,6 +393,9 @@ _LAST_TTS = b""
 # 直近の回答の読み上げ用テキスト（cmd_ai がひらがな読みをセット）。
 _LAST_READING = ""
 
+# デバイスの再生バッファ上限（16kHz/s16le で 6 秒）。超過分は切れる。
+DEVICE_PLAY_CAP = 16000 * 6 * 2
+
 
 def _synthesize_tts(text):
     """text を音声合成し 16kHz/mono/s16le の生 PCM を返す（macOS say）。"""
@@ -403,8 +406,10 @@ def _synthesize_tts(text):
         with tempfile.TemporaryDirectory() as d:
             aiff = os.path.join(d, "s.aiff")
             wavp = os.path.join(d, "s.wav")
+            # -r で話速を少し上げ、6秒バッファに収まる文字数を増やす
+            # （既定より速いが自然に聞こえる範囲）。
             subprocess.run(
-                ["say", "-v", "Kyoko", "-o", aiff, text],
+                ["say", "-v", "Kyoko", "-r", "200", "-o", aiff, text],
                 check=True,
                 timeout=30,
             )
@@ -461,7 +466,14 @@ class Handler(SimpleHTTPRequestHandler):
             # 表示用の漢字ではなく _LAST_READING を合成する。
             global _LAST_TTS
             _LAST_TTS = _synthesize_tts(_LAST_READING or answer)
-            print(f"  TTS -> {len(_LAST_TTS)} bytes", flush=True)
+            secs = len(_LAST_TTS) / 2 / 16000
+            print(f"  TTS -> {len(_LAST_TTS)} bytes ({secs:.1f}s)", flush=True)
+            if len(_LAST_TTS) > DEVICE_PLAY_CAP:
+                print(
+                    f"  WARN: TTS {secs:.1f}s > device cap 6.0s; tail will be"
+                    " cut. Answer/reading too long.",
+                    flush=True,
+                )
             payload = render_text_1bpp(answer)
             content_type = "application/octet-stream"
         elif self.path == "/render":
