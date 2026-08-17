@@ -45,6 +45,30 @@ pub async fn prime(i2s_tx: &mut I2sTx<'_, Async>) {
     }
 }
 
+/// 循環 DMA 再生の後に TX をワンショット状態へ戻す（録音のクロック供給用）。
+/// ハングしないよう各書き込みをタイムアウトで囲み、結果をログする（原因切り分け）。
+pub async fn reset_tx_bounded(i2s_tx: &mut I2sTx<'_, Async>) {
+    let mut silent = [0i32; CHUNK];
+    for i in 0..2 {
+        let r = embassy_time::with_timeout(
+            embassy_time::Duration::from_millis(400),
+            i2s_tx.write_dma_async(as_bytes_mut(&mut silent)),
+        )
+        .await;
+        match r {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                info!("reset_tx: write err at {}", i);
+                break;
+            }
+            Err(_) => {
+                info!("reset_tx: TIMEOUT at {} (tx stuck after circular)", i);
+                break;
+            }
+        }
+    }
+}
+
 /// スピーカー検証用に矩形波のテスト音を鳴らす（`freq_hz`, `ms` ミリ秒）。
 pub async fn play_tone(i2s_tx: &mut I2sTx<'_, Async>, freq_hz: u32, ms: u32) {
     const AMP: i16 = 8000;
@@ -99,6 +123,7 @@ static mut CIRC: [i32; CIRC_WORDS] = [0; CIRC_WORDS];
 /// せず、TX も止めない＝クリック/間欠停止が出ない。ブロッキング。
 pub fn play_pcm_gapless(i2s_tx: &mut I2sTx<'_, Async>, byte_len: usize) {
     let total = byte_len / 2; // サンプル数
+    info!("play: {} bytes ({} samples)", byte_len, total);
     if total == 0 {
         return;
     }
@@ -156,6 +181,7 @@ pub fn play_pcm_gapless(i2s_tx: &mut I2sTx<'_, Async>, byte_len: usize) {
     }
 
     let _ = xfer.stop();
+    info!("play: done");
 }
 
 /// 1 チャンク録音して録音バッファの `filled` 以降へ書き、新しい `filled` を返す。
