@@ -12,7 +12,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
 
-use cardputer_rust::{config, net, terminal, ui, wifi};
+use cardputer_rust::{audio, config, net, terminal, ui, wifi};
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -214,7 +214,10 @@ async fn main(_spawner: Spawner) {
         I2sConfig::new_tdm_philips()
             .with_sample_rate(Rate::from_hz(16000))
             .with_data_format(I2sDataFormat::Data32Channel32)
-            .with_channels(I2sChannels::LEFT),
+            .with_channels(I2sChannels::LEFT)
+            // TX/RX で WS/BCK を共有（RX は TX クロックに従属）。
+            // これで BCLK/WS を TX 側だけに割り当てても RX が録音できる。
+            .with_signal_loopback(true),
     )
     .unwrap();
     let mut i2s_tx = i2s
@@ -228,7 +231,10 @@ async fn main(_spawner: Spawner) {
         .with_din(peripherals.GPIO46)
         .build(i2s_rx_descriptors);
 
-    info!("I2S mic initialized");
+    // 起動時に無音を流して TX 初回のノイズを吸収する。
+    audio::prime(&mut i2s_tx);
+
+    info!("I2S mic/speaker initialized");
 
     /*
     info!("Scanning Wi-Fi...");

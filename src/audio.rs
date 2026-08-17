@@ -47,6 +47,17 @@ pub fn capture_chunk(i2s_rx: &mut I2sRx<'_, Blocking>, filled: usize) -> usize {
     filled + take
 }
 
+/// I2S TX を無音で少し回して初回起動のグリッチ（雑音）を吸収する。
+/// 起動時に一度呼ぶ。
+pub fn prime(i2s_tx: &mut I2sTx<'_, Blocking>) {
+    let silent = [0i32; 1024];
+    for _ in 0..4 {
+        if i2s_tx.write_words(&silent).is_err() {
+            break;
+        }
+    }
+}
+
 /// スピーカー検証用に矩形波のテスト音を鳴らす（`freq_hz`, `ms` ミリ秒）。
 ///
 /// I2S は 32bit スロット。16bit サンプルを上位に載せる（sample << 16）。
