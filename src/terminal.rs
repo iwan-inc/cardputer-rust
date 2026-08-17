@@ -328,7 +328,11 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
     }
 
     // レスポンスを読み、ヘッダ（\r\n\r\n まで）を飛ばして本文を再生する。
+    // 本文（PCM）は 2 バイト境界を保つため 2048 バイト単位に貯めてから再生する
+    // （ソケット読み取りは境界に揃わないので、端数を取りこぼさない）。
     let mut buf = [0u8; 512];
+    let mut acc = [0u8; 2048];
+    let mut acc_len = 0usize;
     let mut header_done = false;
     let mut m = 0u8; // \r\n\r\n のマッチ状態
 
@@ -366,9 +370,24 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
             }
         }
 
-        if start < n {
-            audio::play_pcm(i2s_tx, &buf[start..n]).await;
+        // 本文バイトを acc に貯め、満杯（2048）になったら再生する。
+        let mut off = start;
+        while off < n {
+            let take = core::cmp::min(acc.len() - acc_len, n - off);
+            acc[acc_len..acc_len + take].copy_from_slice(&buf[off..off + take]);
+            acc_len += take;
+            off += take;
+            if acc_len == acc.len() {
+                audio::play_pcm(i2s_tx, &acc).await;
+                acc_len = 0;
+            }
         }
+    }
+
+    // 残り（2 バイト境界まで）を再生する。
+    let even = acc_len & !1;
+    if even >= 2 {
+        audio::play_pcm(i2s_tx, &acc[..even]).await;
     }
 }
 
