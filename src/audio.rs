@@ -147,15 +147,16 @@ pub async fn capture_chunk(
         return filled;
     }
 
-    // RX を大きめ（最大 1024=64ms）に読む。TX 無音は RX よりわずかに長い
-    // だけにする。以前は TX を RX の 2 倍流し join で両方待っていたため、
-    // 64ms かけて 32ms しか録音できず（約半分を取りこぼし・時間 2 倍圧縮）
-    // whisper が誤認識していた。TX を「RX + 少しの余白」にすると、クロックは
-    // RX 完了まで確実に供給されつつ、取りこぼしがほぼ無くなる。
-    let take = core::cmp::min(CHUNK, MAX_SAMPLES - filled);
+    // RX は 512（RX 用 DMA ディスクリプタに確実に収まる実績値。1024=4096byte
+    // にすると descriptor 不足で read が失敗し 0 サンプルになる）。
+    // TX 無音は「RX + 128 フレーム」だけにする。以前は TX を RX の 2 倍流し
+    // join で両方待っていたため 32ms 分しか録れず（約半分を取りこぼし・時間
+    // 2 倍圧縮）whisper が誤認識していた。余白 128 フレーム(8ms)あれば RX 完了
+    // までクロックは確実に供給され、取りこぼしは大幅に減る。
+    let take = core::cmp::min(512, MAX_SAMPLES - filled);
     let mut chunk = [0i32; CHUNK];
-    let mut silent = [0i32; CHUNK + 128];
-    let tx_len = core::cmp::min(silent.len(), take + 128);
+    let mut silent = [0i32; CHUNK];
+    let tx_len = core::cmp::min(CHUNK, take + 128);
 
     // TX(無音)でクロックを供給しつつ RX(取り込み)を同時実行。
     // ハードフリーズ防止のためタイムアウトを付ける。
