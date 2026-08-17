@@ -27,6 +27,7 @@ use esp_hal::{
     system::software_reset,
 };
 use esp_radio::wifi::WifiController;
+use log::info;
 use tca8418::Tca8418;
 
 use crate::{audio, config, keyboard, net, ui, wifi};
@@ -305,6 +306,7 @@ async fn send_stt<D>(
 /// ギャップレス再生のため、まず全体をバッファ（`dl_buf`, 上限 3 秒）へ
 /// ダウンロードしてから、循環 DMA で途切れず再生する。上限超過分は切り捨て。
 async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
+    let t_start = embassy_time::Instant::now();
     let mut rx = [0u8; 2048];
     let mut tx = [0u8; 512];
     let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
@@ -382,7 +384,15 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
     }
 
     // ダウンロード完了 → ブロック単位で再生（TX は通常モードのまま）。
+    let dl_ms = t_start.elapsed().as_millis();
+    let t_play = embassy_time::Instant::now();
     audio::play_pcm_blocks(i2s_tx, byte_len).await;
+    info!(
+        "lat: speak download {}ms ({} bytes) | play {}ms",
+        dl_ms,
+        byte_len,
+        t_play.elapsed().as_millis()
+    );
 }
 
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
@@ -625,6 +635,9 @@ pub async fn run_input<D, I>(
         // Fn+A なら /ask（AI回答）、Fn+Space なら /stt（文字起こし）。
         if stop_send {
             if let Some(stack) = stack {
+                // レイテンシ計測の基点（録音終了 = record_end）。
+                let t_rec_end = embassy_time::Instant::now();
+                let rec_ms = (rec_len as u64) * 1000 / audio::SAMPLE_RATE as u64;
                 let pcm = audio::pcm_bytes(rec_len);
                 let path = if rec_is_ask {
                     config::ASK_PATH
@@ -632,6 +645,11 @@ pub async fn run_input<D, I>(
                     config::STT_PATH
                 };
                 send_stt(&mut editor, display, style, stack, pcm, path).await;
+                info!(
+                    "lat: rec {}ms | record_end->reply {}ms",
+                    rec_ms,
+                    t_rec_end.elapsed().as_millis()
+                );
 
                 // Fn+A（AI質問）のときは回答を音声でも読み上げる。
                 if rec_is_ask {

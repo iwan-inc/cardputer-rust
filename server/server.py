@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 import wave
@@ -282,15 +283,26 @@ def cmd_ai(arg):
 
     client = _get_anthropic()
     messages = [{"role": "user", "content": question}]
-    # ツール利用ループ（get_weather を最大数回まで実行）。
+    # ツール利用ループ（get_weather を最大数回まで実行）。ストリーミングで
+    # 最初のトークン時刻(claude_first)と完了時刻(claude_end)を計測する。
+    global _LAST_TIMING
+    t_first = None
     for _ in range(4):
-        resp = client.messages.create(
+        with client.messages.stream(
             model="claude-opus-4-8",
             max_tokens=512,
             system=system,
             tools=tools,
             messages=messages,
-        )
+        ) as stream:
+            for event in stream:
+                if (
+                    t_first is None
+                    and event.type == "content_block_delta"
+                    and getattr(event.delta, "type", None) == "text_delta"
+                ):
+                    t_first = time.perf_counter()
+            resp = stream.get_final_message()
         if resp.stop_reason != "tool_use":
             break
         messages.append({"role": "assistant", "content": resp.content})
@@ -305,6 +317,8 @@ def cmd_ai(arg):
                     "content": cmd_tenki(loc),
                 })
         messages.append({"role": "user", "content": results})
+
+    _LAST_TIMING = {"claude_first": t_first, "claude_end": time.perf_counter()}
 
     text = "".join(
         block.text for block in resp.content if block.type == "text"
@@ -439,6 +453,9 @@ _LAST_TTS = b""
 # 直近の回答の読み上げ用テキスト（cmd_ai がひらがな読みをセット）。
 _LAST_READING = ""
 
+# 直近の Claude 呼び出しのタイムスタンプ（perf_counter）。/ask が内訳表示に使う。
+_LAST_TIMING = {}
+
 # デバイスの再生バッファ上限（16kHz/s16le で 6 秒）。超過分は切れる。
 DEVICE_PLAY_CAP = 16000 * 6 * 2
 
@@ -472,6 +489,32 @@ def _synthesize_tts(text):
         return b""
 
 
+def _print_ask_latency(t_upload, t_stt, timing, t_tts):
+    """/ask の各段階のレイテンシ内訳を upload_end 基準の相対秒で表示する。"""
+    base = t_upload
+    rows = [("upload_end", t_upload)]
+    rows.append(("stt_end", t_stt))
+    cf = timing.get("claude_first")
+    if cf is not None:
+        rows.append(("claude_first", cf))
+    ce = timing.get("claude_end")
+    if ce is not None:
+        rows.append(("claude_end", ce))
+    rows.append(("tts_end", t_tts))
+    print("  --- latency (server, from upload_end) ---", flush=True)
+    prev = base
+    for name, t in rows:
+        rel = t - base
+        step = t - prev
+        print(f"    {name:<13} +{rel:5.2f}s  (Δ{step:5.2f}s)", flush=True)
+        prev = t
+    print(
+        "    (device adds: record→upload before this, and "
+        "/speak download→play after)",
+        flush=True,
+    )
+
+
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/speak":
@@ -501,17 +544,21 @@ class Handler(SimpleHTTPRequestHandler):
             content_type = "application/octet-stream"
         elif self.path == "/ask":
             # 音声を文字起こしし、その内容を Claude に質問して回答を返す。
+            # 各段階の所要時間を計測し、最後に内訳を表示する。
+            t_upload = time.perf_counter()  # 本文受信完了 = upload_end
             print(f"[POST /ask] {len(body)} bytes", flush=True)
             _save_debug_wav(body)
             question = transcribe(body)
+            t_stt = time.perf_counter()
             print(f"  STT -> {question!r}", flush=True)
-            answer = cmd_ai(question)  # 副作用で _LAST_READING(かな) をセット
+            answer = cmd_ai(question)  # 副作用で _LAST_READING, _LAST_TIMING をセット
             print(f"  AI  -> {answer!r}", flush=True)
             print(f"  YOMI-> {_LAST_READING!r}", flush=True)
             # 読み上げ用（ひらがな）を音声合成して保持。漢字誤読を防ぐため
             # 表示用の漢字ではなく _LAST_READING を合成する。
             global _LAST_TTS
             _LAST_TTS = _synthesize_tts(_LAST_READING or answer)
+            t_tts = time.perf_counter()
             secs = len(_LAST_TTS) / 2 / 16000
             print(f"  TTS -> {len(_LAST_TTS)} bytes ({secs:.1f}s)", flush=True)
             if len(_LAST_TTS) > DEVICE_PLAY_CAP:
@@ -520,6 +567,7 @@ class Handler(SimpleHTTPRequestHandler):
                     " cut. Answer/reading too long.",
                     flush=True,
                 )
+            _print_ask_latency(t_upload, t_stt, _LAST_TIMING, t_tts)
             payload = render_text_1bpp(answer)
             content_type = "application/octet-stream"
         elif self.path == "/render":
