@@ -76,29 +76,35 @@ pub async fn play_tone(i2s_tx: &mut I2sTx<'_, Async>, freq_hz: u32, ms: u32) {
     }
 }
 
-/// s16le の PCM バイト列を再生する（16kHz/mono）。奇数バイトは無視。
-pub async fn play_pcm(i2s_tx: &mut I2sTx<'_, Async>, pcm: &[u8]) {
-    let mut chunk = [0i32; CHUNK];
-    let mut i = 0;
-    let samples = pcm.len() / 2;
+/// 再生 1 書き込みのサンプル数（大きいほど TX 再起動＝クリックが減る）。
+pub const PLAY_SAMPLES: usize = 4096;
 
-    while i < samples {
-        let n = core::cmp::min(CHUNK, samples - i);
-        for (j, slot) in chunk.iter_mut().take(n).enumerate() {
-            let lo = pcm[(i + j) * 2] as i16;
-            let hi = pcm[(i + j) * 2 + 1] as i16;
-            let s = (lo & 0xFF) | (hi << 8);
-            *slot = (s as i32) << 16;
-        }
-        if i2s_tx
-            .write_dma_async(as_bytes_mut(&mut chunk[..n]))
-            .await
-            .is_err()
-        {
-            break;
-        }
-        i += n;
+// 再生用の静的バッファ（スタック肥大を避ける）。
+static mut PLAY_DMA: [i32; PLAY_SAMPLES] = [0; PLAY_SAMPLES];
+static mut PLAY_ACC: [u8; PLAY_SAMPLES * 2] = [0; PLAY_SAMPLES * 2];
+
+/// ストリーミング再生用の蓄積バッファ（PCM を溜めてから大ブロックで再生）。
+pub fn play_acc() -> &'static mut [u8] {
+    // SAFETY: 再生はキーボードタスクからのみ呼ばれ、多重には走らない。
+    unsafe { &mut *core::ptr::addr_of_mut!(PLAY_ACC) }
+}
+
+/// s16le の PCM バイト列（<= PLAY_SAMPLES*2）を 1 回の DMA でまとめて再生する。
+/// 大きくまとめることで TX の再起動によるクリック音を減らす。
+pub async fn play_dma_block(i2s_tx: &mut I2sTx<'_, Async>, pcm: &[u8]) {
+    let n = core::cmp::min(pcm.len() / 2, PLAY_SAMPLES);
+    if n == 0 {
+        return;
     }
+    // SAFETY: 単一タスクからのみアクセスする。
+    let dma = unsafe { &mut *core::ptr::addr_of_mut!(PLAY_DMA) };
+    for (j, slot) in dma.iter_mut().take(n).enumerate() {
+        let lo = pcm[j * 2] as u16;
+        let hi = pcm[j * 2 + 1] as u16;
+        let s = (lo | (hi << 8)) as i16;
+        *slot = (s as i32) << 16;
+    }
+    let _ = i2s_tx.write_dma_async(as_bytes_mut(&mut dma[..n])).await;
 }
 
 /// 1 チャンク録音して録音バッファの `filled` 以降へ書き、新しい `filled` を返す。

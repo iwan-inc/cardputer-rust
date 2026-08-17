@@ -204,8 +204,10 @@ async fn main(_spawner: Spawner) {
     // クロックは同じ（BCLK=41, WS=43, 32bit/16kHz）。ピン競合を避けるため
     // BCLK/WS は TX 側で設定し、RX は DIN のみ。録音と再生は同時に使わない。
     // マイク DIN=46, スピーカー DOUT=42（鳴らなければ 21 を試す）。
+    // TX は再生 1 ブロック分（4096 サンプル = 16384 バイト）を一度に転送できる
+    // ようディスクリプタを大きめに確保（クリック音低減）。
     let (_, i2s_rx_descriptors, _, i2s_tx_descriptors) =
-        esp_hal::dma_buffers!(4096, 4096);
+        esp_hal::dma_buffers!(4096, 16384);
     let i2s = I2s::new(
         peripherals.I2S0,
         peripherals.DMA_CH0,
