@@ -114,28 +114,40 @@ pub async fn capture_chunk(
         return filled;
     }
 
-    let take = core::cmp::min(CHUNK, MAX_SAMPLES - filled);
+    // RX は 512、TX 無音は RX の 2 倍流す。TX クロックが RX 読み出し中に
+    // 途切れないよう、TX を長めにして最後まで供給する。
+    let take = core::cmp::min(512, MAX_SAMPLES - filled);
     let mut chunk = [0i32; CHUNK];
     let mut silent = [0i32; CHUNK];
+    let tx_len = core::cmp::min(CHUNK, take * 2);
 
     // TX(無音)でクロックを供給しつつ RX(取り込み)を同時実行。
-    let (rx_res, _tx_res) = embassy_futures::join::join(
+    // ハードフリーズ防止のためタイムアウトを付ける。
+    let joined = embassy_futures::join::join(
         i2s_rx.read_dma_async(as_bytes_mut(&mut chunk[..take])),
-        i2s_tx.write_dma_async(as_bytes_mut(&mut silent[..take])),
+        i2s_tx.write_dma_async(as_bytes_mut(&mut silent[..tx_len])),
+    );
+
+    match embassy_time::with_timeout(
+        embassy_time::Duration::from_millis(300),
+        joined,
     )
-    .await;
-
-    if rx_res.is_err() {
-        return filled;
+    .await
+    {
+        Ok((Ok(()), _)) => {
+            // SAFETY: 録音はキーボードタスクからのみ呼ばれ、多重には走らない。
+            let buf = unsafe { &mut *core::ptr::addr_of_mut!(RECORD_BUF) };
+            for (i, &word) in chunk[..take].iter().enumerate() {
+                buf[filled + i] = (word >> 16) as i16;
+            }
+            filled + take
+        }
+        Ok((Err(_), _)) => filled,
+        Err(_) => {
+            info!("capture timeout");
+            filled
+        }
     }
-
-    // SAFETY: 録音はキーボードタスクからのみ呼ばれ、多重には走らない。
-    let buf = unsafe { &mut *core::ptr::addr_of_mut!(RECORD_BUF) };
-    for (i, &word) in chunk[..take].iter().enumerate() {
-        buf[filled + i] = (word >> 16) as i16;
-    }
-
-    filled + take
 }
 
 /// 録音済み `filled` サンプルを PCM（s16le）バイトとして返す。統計もログ出力。
