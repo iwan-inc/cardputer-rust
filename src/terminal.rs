@@ -383,6 +383,10 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
 
     // ダウンロード完了 → 途切れなく再生。
     audio::play_pcm_gapless(i2s_tx, byte_len);
+
+    // 循環 DMA 後、TX を通常（ワンショット）状態へ戻す。これをしないと
+    // 次回の録音（TX 無音でクロック供給）が働かず、音声を拾えなくなる。
+    audio::prime(i2s_tx).await;
 }
 
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
