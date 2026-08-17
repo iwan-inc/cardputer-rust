@@ -12,7 +12,7 @@ use embedded_graphics::{
 };
 use embedded_hal_bus::spi::ExclusiveDevice;
 
-use cardputer_rust::{config, net, terminal, ui, wifi};
+use cardputer_rust::{audio, config, net, terminal, ui, wifi};
 
 use esp_backtrace as _;
 use esp_hal::{
@@ -214,24 +214,29 @@ async fn main(_spawner: Spawner) {
         I2sConfig::new_tdm_philips()
             .with_sample_rate(Rate::from_hz(16000))
             .with_data_format(I2sDataFormat::Data32Channel32)
-            .with_channels(I2sChannels::LEFT),
+            .with_channels(I2sChannels::LEFT)
+            // TX/RX で WS/BCK を共有（RX は TX クロックに従属）。
+            // 録音時は TX に無音を流してクロックを供給する（audio 側で同時実行）。
+            .with_signal_loopback(true),
     )
-    .unwrap();
-    // 現状: 録音優先。RX がマスターで BCLK/WS を駆動（録音が動く）。
-    // TX は DOUT のみ（再生は RX クロックが要るため単独では無音）。
-    // マイクとスピーカーの両立には全二重（TX クロック常時駆動）が必要で、別途対応。
+    .unwrap()
+    .into_async();
+    // TX がマスターで BCLK=41/WS=43/DOUT=42 を駆動。RX は DIN=46 のみ。
     let mut i2s_tx = i2s
         .i2s_tx
+        .with_bclk(peripherals.GPIO41)
+        .with_ws(peripherals.GPIO43)
         .with_dout(peripherals.GPIO42)
         .build(i2s_tx_descriptors);
     let mut i2s_rx = i2s
         .i2s_rx
-        .with_bclk(peripherals.GPIO41)
-        .with_ws(peripherals.GPIO43)
         .with_din(peripherals.GPIO46)
         .build(i2s_rx_descriptors);
 
-    info!("I2S mic initialized");
+    // 起動時に無音を流して TX 初回のノイズを吸収する。
+    audio::prime(&mut i2s_tx).await;
+
+    info!("I2S mic/speaker initialized");
 
     /*
     info!("Scanning Wi-Fi...");

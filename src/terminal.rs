@@ -22,7 +22,7 @@ use embedded_graphics::{
 };
 use embedded_hal::i2c::I2c;
 use esp_hal::{
-    Blocking,
+    Async,
     i2s::master::{I2sRx, I2sTx},
     system::software_reset,
 };
@@ -312,8 +312,8 @@ pub async fn run_input<D, I>(
     style: MonoTextStyle<'_, Rgb565>,
     stack: Option<Stack<'_>>,
     controller: &mut WifiController<'_>,
-    i2s_rx: &mut I2sRx<'_, Blocking>,
-    i2s_tx: &mut I2sTx<'_, Blocking>,
+    i2s_rx: &mut I2sRx<'_, Async>,
+    i2s_tx: &mut I2sTx<'_, Async>,
 ) where
     D: DrawTarget<Color = Rgb565>,
     I: I2c,
@@ -356,7 +356,7 @@ pub async fn run_input<D, I>(
 
         // 録音中は 1 チャンク（約64ms）取り込む。満杯なら自動停止して送信。
         if recording {
-            rec_len = audio::capture_chunk(i2s_rx, rec_len);
+            rec_len = audio::capture_chunk(i2s_rx, i2s_tx, rec_len).await;
             if rec_len >= audio::MAX_SAMPLES {
                 recording = false;
                 stop_send = true;
@@ -516,7 +516,7 @@ pub async fn run_input<D, I>(
         // Fn+P によるスピーカー検証用テスト音（440Hz, 500ms）。
         if tone_requested {
             let _ = ui::show_message(display, style, "Beep...");
-            audio::play_tone(i2s_tx, 440, 500);
+            audio::play_tone(i2s_tx, 440, 500).await;
             editor.reset_to_bottom();
             cursor_shown = false;
             acted = true;
