@@ -381,12 +381,8 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
         }
     }
 
-    // ダウンロード完了 → 途切れなく再生。
-    audio::play_pcm_gapless(i2s_tx, byte_len);
-
-    // 循環 DMA 後、TX を通常（ワンショット）状態へ戻す（録音のクロック供給用）。
-    // ハングしないようタイムアウト付き。詰まる場合はログに出る。
-    audio::reset_tx_bounded(i2s_tx).await;
+    // ダウンロード完了 → ブロック単位で再生（TX は通常モードのまま）。
+    audio::play_pcm_blocks(i2s_tx, byte_len).await;
 }
 
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
