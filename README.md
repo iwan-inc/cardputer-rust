@@ -57,6 +57,12 @@ python3 -m venv .venv
 デバイスの接続先は `src/config.rs`（`SERVER_IP` / `SERVER_PORT`）で設定する。
 `.venv/` は git 管理外。
 
+エンドポイント:
+
+- `POST /render` — テキスト（コマンド）を画像化して返す
+- `POST /stt` — 音声（WAV / 16kHz mono s16le）を faster-whisper で日本語に
+  文字起こしして画像で返す（初回はモデルを自動 DL、`WHISPER_MODEL` で切替）
+
 ## 構成
 
 - `src/bin/main.rs` — エントリポイント（ペリフェラル初期化とメイン処理）

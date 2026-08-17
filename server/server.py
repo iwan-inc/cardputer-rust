@@ -5,7 +5,12 @@
 - POST /render : 本文をコマンドとして解釈し、結果を 240x135 の 1bit モノクロ
                  画像に描画して返す（日本語対応）。デバイスはこの画素を
                  そのまま LCD に転送する。
+- POST /stt    : 音声（WAV か 16kHz/mono/s16le の生 PCM）を受け取り、
+                 faster-whisper で日本語に文字起こしして画像で返す。
 - POST (その他) : 本文をコンソール表示し、確認メッセージを返す。
+
+文字起こしモデルは環境変数 WHISPER_MODEL で切替（既定 small）。
+初回の /stt 呼び出し時にモデルを自動ダウンロードする。
 
 セットアップと起動（Pillow を入れた venv で起動する）:
     cd server
@@ -20,13 +25,17 @@
     help                 コマンド一覧
     それ以外              「受信: ...」をエコー
 """
+import io
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
+import wave
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
@@ -192,19 +201,91 @@ def handle_command(text):
         return f"エラー: {e}"
 
 
+# ---- 音声文字起こし（STT: faster-whisper）----
+
+_WHISPER_MODEL = None
+
+
+def _get_whisper():
+    """Whisper モデルを遅延ロードする（初回のみモデルを DL）。
+
+    モデルは環境変数 WHISPER_MODEL で切替（既定 small）。tiny/base/small/medium。
+    """
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        from faster_whisper import WhisperModel
+
+        name = os.environ.get("WHISPER_MODEL", "small")
+        print(f"Loading Whisper model: {name} ...", flush=True)
+        _WHISPER_MODEL = WhisperModel(name, device="cpu", compute_type="int8")
+        print("Whisper model loaded.", flush=True)
+    return _WHISPER_MODEL
+
+
+def _decode_audio(data):
+    """WAV（優先）または 16kHz/mono/s16le の生 PCM を 16kHz float32 に変換。"""
+    sr = 16000
+    try:
+        with wave.open(io.BytesIO(data), "rb") as w:
+            sr = w.getframerate()
+            ch = w.getnchannels()
+            sw = w.getsampwidth()
+            frames = w.readframes(w.getnframes())
+        if sw != 2:
+            raise ValueError("16-bit PCM のみ対応")
+        audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if ch > 1:
+            audio = audio.reshape(-1, ch).mean(axis=1)
+    except (wave.Error, EOFError, ValueError):
+        # WAV でなければ 16kHz mono s16le の生 PCM とみなす。
+        audio = np.frombuffer(data, dtype=np.int16).astype(np.float32) / 32768.0
+
+    # 16kHz でなければ線形補間でリサンプル。
+    if sr != 16000 and len(audio) > 1:
+        n = int(round(len(audio) * 16000 / sr))
+        audio = np.interp(
+            np.linspace(0, len(audio), n, endpoint=False),
+            np.arange(len(audio)),
+            audio,
+        ).astype(np.float32)
+
+    return audio
+
+
+def transcribe(data):
+    """音声バイト列を日本語で文字起こしする。"""
+    audio = _decode_audio(data)
+    if len(audio) < 1600:  # 0.1 秒未満
+        return "（音声が短すぎます）"
+
+    model = _get_whisper()
+    segments, _info = model.transcribe(audio, language="ja", vad_filter=True)
+    text = "".join(seg.text for seg in segments).strip()
+    return text or "（認識できませんでした）"
+
+
 class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
-        text = body.decode("utf-8", errors="replace")
-        print(f"[POST {self.path}] {text!r}", flush=True)
 
-        if self.path == "/render":
+        if self.path == "/stt":
+            # 音声（WAV か生 PCM）を文字起こしして画像で返す。
+            print(f"[POST /stt] {len(body)} bytes", flush=True)
+            text = transcribe(body)
+            print(f"  -> {text!r}", flush=True)
+            payload = render_text_1bpp(f"認識: {text}")
+            content_type = "application/octet-stream"
+        elif self.path == "/render":
+            text = body.decode("utf-8", errors="replace")
+            print(f"[POST /render] {text!r}", flush=True)
             content = handle_command(text)
             print(f"  -> {content!r}", flush=True)
             payload = render_text_1bpp(content)
             content_type = "application/octet-stream"
         else:
+            text = body.decode("utf-8", errors="replace")
+            print(f"[POST {self.path}] {text!r}", flush=True)
             payload = f"[server] {text}".encode("utf-8")
             content_type = "text/plain; charset=utf-8"
 
