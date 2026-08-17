@@ -21,11 +21,15 @@ use embedded_graphics::{
     text::Text,
 };
 use embedded_hal::i2c::I2c;
-use esp_hal::system::software_reset;
+use esp_hal::{
+    Blocking,
+    i2s::master::I2sRx,
+    system::software_reset,
+};
 use esp_radio::wifi::WifiController;
 use tca8418::Tca8418;
 
-use crate::{config, keyboard, net, ui, wifi};
+use crate::{audio, config, keyboard, net, ui, wifi};
 
 // レイアウト定数（画面 240x135, FONT_10X20）
 const CHAR_W: i32 = 10;
@@ -253,6 +257,51 @@ async fn send_message<D>(
     editor.reset_to_bottom();
 }
 
+/// マイクで録音し、`/stt` に送って文字起こし結果の画像を表示する。
+async fn record_and_send<D>(
+    editor: &mut Editor,
+    display: &mut D,
+    style: MonoTextStyle<'_, Rgb565>,
+    stack: Stack<'_>,
+    i2s_rx: &mut I2sRx<'_, Blocking>,
+) where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let _ = ui::show_message(display, style, "Recording...");
+    let pcm = audio::record(i2s_rx).await;
+
+    let _ = ui::show_message(display, style, "Transcribing...");
+
+    let mut rx = [0u8; 1024];
+    let mut tx = [0u8; 1024];
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+
+    let mut response = alloc::vec![0u8; RESPONSE_CAP];
+
+    let result = net::http_post(
+        &mut socket,
+        config::SERVER_IP,
+        config::SERVER_PORT,
+        config::STT_PATH,
+        config::SERVER_HOST,
+        pcm,
+        &mut response,
+    )
+    .await;
+
+    match result {
+        Ok(len) => {
+            let body = net::extract_body(&response[..len]);
+            let _ = ui::draw_image_1bpp(display, body, SCREEN_W, SCREEN_H);
+        }
+        Err(_) => {
+            let _ = ui::show_message(display, style, "STT error");
+        }
+    }
+
+    editor.reset_to_bottom();
+}
+
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
 ///
 /// `stack` が `Some` のときは Enter で入力を POST 送信し、応答を表示する。
@@ -265,6 +314,7 @@ pub async fn run_input<D, I>(
     style: MonoTextStyle<'_, Rgb565>,
     stack: Option<Stack<'_>>,
     controller: &mut WifiController<'_>,
+    i2s_rx: &mut I2sRx<'_, Blocking>,
 ) where
     D: DrawTarget<Color = Rgb565>,
     I: I2c,
@@ -295,6 +345,7 @@ pub async fn run_input<D, I>(
         let mut send_requested = false;
         let mut scan_requested = false;
         let mut ip_requested = false;
+        let mut record_requested = false;
 
         // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
         if let Ok(events) = keypad.events() {
@@ -344,6 +395,10 @@ pub async fn run_input<D, I>(
                                     held = None;
                                 } else if fn_down && base == 'i' {
                                     ip_requested = true;
+                                    held = None;
+                                } else if fn_down && base == ' ' {
+                                    // Fn+Space で録音→文字起こし。
+                                    record_requested = true;
                                     held = None;
                                 } else if fn_down && base == 'r' {
                                     // Fn+R でソフトリセット（戻らない）。
@@ -423,6 +478,19 @@ pub async fn run_input<D, I>(
                 cursor_shown = false;
                 acted = true;
             }
+        }
+
+        // Fn+Space による録音→文字起こし。
+        if record_requested {
+            if let Some(stack) = stack {
+                record_and_send(&mut editor, display, style, stack, i2s_rx)
+                    .await;
+            } else {
+                let _ = ui::show_message(display, style, "Offline");
+                editor.reset_to_bottom();
+            }
+            cursor_shown = false;
+            acted = true;
         }
 
         // 押しっぱなしのキーをリピート入力する。

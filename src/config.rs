@@ -31,3 +31,6 @@ pub const POST_PATH: &str = "/msg";
 
 /// 入力を送り、描画済み 1bit 画像を受け取るパス（日本語対応）。
 pub const RENDER_PATH: &str = "/render";
+
+/// 録音音声を送り、文字起こし結果の画像を受け取るパス。
+pub const STT_PATH: &str = "/stt";

@@ -22,6 +22,12 @@ use esp_hal::{
     delay::Delay,
     gpio::{Level, Output, OutputConfig},
     i2c::master::{Config as I2cConfig, I2c},
+    i2s::master::{
+        Channels as I2sChannels,
+        Config as I2sConfig,
+        DataFormat as I2sDataFormat,
+        I2s,
+    },
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi},
@@ -29,6 +35,7 @@ use esp_hal::{
     time::Rate,
 };
 
+use cardputer_rust::es8311::Es8311;
 use tca8418::{PinMask, Tca8418};
 
 use log::info;
@@ -175,10 +182,39 @@ async fn main(_spawner: Spawner) {
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
 
+    // ES8311 コーデック（マイク）を同じ I2C バスで初期化してから、
+    // バスをキーボードへ渡す（ES8311 の設定は一度きり）。
+    let mut es8311 = Es8311::new(i2c);
+    match es8311.init_mic() {
+        Ok(()) => info!("ES8311 mic initialized"),
+        Err(e) => info!("ES8311 init failed: {:?}", e),
+    }
+    let i2c = es8311.into_inner();
+
     let mut keypad = Tca8418::new(i2c);
     keypad.configure_keypad(PinMask::ALL).unwrap();
 
     info!("Keyboard initialized");
+
+    // マイク用 I2S RX（BCK=41, WS=43, DIN=46, モノラル左, 16kHz/16bit）。
+    let (_, i2s_rx_descriptors, _, _) = esp_hal::dma_buffers!(4096, 0);
+    let i2s = I2s::new(
+        peripherals.I2S0,
+        peripherals.DMA_CH0,
+        I2sConfig::new_tdm_philips()
+            .with_sample_rate(Rate::from_hz(16000))
+            .with_data_format(I2sDataFormat::Data16Channel16)
+            .with_channels(I2sChannels::LEFT),
+    )
+    .unwrap();
+    let mut i2s_rx = i2s
+        .i2s_rx
+        .with_bclk(peripherals.GPIO41)
+        .with_ws(peripherals.GPIO43)
+        .with_din(peripherals.GPIO46)
+        .build(i2s_rx_descriptors);
+
+    info!("I2S mic initialized");
 
     /*
     info!("Scanning Wi-Fi...");
@@ -347,6 +383,7 @@ async fn main(_spawner: Spawner) {
                 style,
                 Some(stack),
                 &mut wifi_controller,
+                &mut i2s_rx,
             )
             .await;
         })
@@ -374,6 +411,7 @@ async fn main(_spawner: Spawner) {
             style,
             None,
             &mut wifi_controller,
+            &mut i2s_rx,
         )
         .await;
     }
