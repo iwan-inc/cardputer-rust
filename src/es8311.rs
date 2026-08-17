@@ -59,10 +59,10 @@ impl<I2C: I2c> Es8311<I2C> {
         // ADC / マイク経路の電源・ゲイン
         self.write(0x0D, 0x01)?; // アナログ電源 ON
         self.write(0x0E, 0x02)?; // PGA + ADC モジュレータ
-        self.write(0x14, 0x1A)?; // アナログマイク選択 + PGA 最大
+        self.write(0x14, 0x18)?; // アナログマイク選択 + PGA ゲイン（8, クリップ抑制）
         self.write(0x15, 0x00)?;
         self.write(0x16, 0x06)?; // マイクゲイン（要調整）
-        self.write(0x17, 0xC8)?; // ADC デジタルゲイン
+        self.write(0x17, 0xBF)?; // ADC デジタルゲイン（0dB, クリップ抑制）
         self.write(0x1B, 0x0A)?;
         self.write(0x1C, 0x6A)?; // ADC EQ バイパス + DC オフセット除去
 

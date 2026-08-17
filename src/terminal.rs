@@ -257,19 +257,16 @@ async fn send_message<D>(
     editor.reset_to_bottom();
 }
 
-/// マイクで録音し、`/stt` に送って文字起こし結果の画像を表示する。
-async fn record_and_send<D>(
+/// 録音済み PCM を `/stt` に送り、文字起こし結果の画像を表示する。
+async fn send_stt<D>(
     editor: &mut Editor,
     display: &mut D,
     style: MonoTextStyle<'_, Rgb565>,
     stack: Stack<'_>,
-    i2s_rx: &mut I2sRx<'_, Blocking>,
+    pcm: &[u8],
 ) where
     D: DrawTarget<Color = Rgb565>,
 {
-    let _ = ui::show_message(display, style, "Recording...");
-    let pcm = audio::record(i2s_rx).await;
-
     let _ = ui::show_message(display, style, "Transcribing...");
 
     let mut rx = [0u8; 1024];
@@ -334,6 +331,11 @@ pub async fn run_input<D, I>(
     let mut blink_ticks: u32 = 0;
     let mut cursor_shown = false;
 
+    // 録音状態（Fn+Space を押している間だけ録音、離したら送信）。
+    let mut recording = false;
+    let mut rec_len: usize = 0;
+    let mut rec_key: (u8, u8) = (0, 0);
+
     loop {
         // 入力やカーソル描画の前に、表示中のカーソルを消して土台を綺麗にする。
         if cursor_shown {
@@ -345,7 +347,16 @@ pub async fn run_input<D, I>(
         let mut send_requested = false;
         let mut scan_requested = false;
         let mut ip_requested = false;
-        let mut record_requested = false;
+        let mut stop_send = false;
+
+        // 録音中は 1 チャンク（約64ms）取り込む。満杯なら自動停止して送信。
+        if recording {
+            rec_len = audio::capture_chunk(i2s_rx, rec_len);
+            if rec_len >= audio::MAX_SAMPLES {
+                recording = false;
+                stop_send = true;
+            }
+        }
 
         // I2C 読み出しに失敗しても panic せず、次の周回で再試行する。
         if let Ok(events) = keypad.events() {
@@ -397,8 +408,16 @@ pub async fn run_input<D, I>(
                                     ip_requested = true;
                                     held = None;
                                 } else if fn_down && base == ' ' {
-                                    // Fn+Space で録音→文字起こし。
-                                    record_requested = true;
+                                    // Fn+Space を押している間だけ録音する。
+                                    if stack.is_some() && !recording {
+                                        recording = true;
+                                        rec_len = 0;
+                                        rec_key = (key.row, key.col);
+                                        let _ = ui::show_message(
+                                            display, style, "Recording...",
+                                        );
+                                        cursor_shown = false;
+                                    }
                                     held = None;
                                 } else if fn_down && base == 'r' {
                                     // Fn+R でソフトリセット（戻らない）。
@@ -421,6 +440,12 @@ pub async fn run_input<D, I>(
 
                 if let Some(key) = event.released_keypad() {
                     let (row, col) = keyboard::remap_key(key.row, key.col);
+
+                    // 録音キーを離したら録音停止→送信。
+                    if recording && (key.row, key.col) == rec_key {
+                        recording = false;
+                        stop_send = true;
+                    }
 
                     match (row, col) {
                         (2, 1) => shift_down = false,
@@ -480,15 +505,13 @@ pub async fn run_input<D, I>(
             }
         }
 
-        // Fn+Space による録音→文字起こし。
-        if record_requested {
+        // 録音キーを離した（または満杯）→ 録音を送信して文字起こし。
+        if stop_send {
             if let Some(stack) = stack {
-                record_and_send(&mut editor, display, style, stack, i2s_rx)
-                    .await;
-            } else {
-                let _ = ui::show_message(display, style, "Offline");
-                editor.reset_to_bottom();
+                let pcm = audio::pcm_bytes(rec_len);
+                send_stt(&mut editor, display, style, stack, pcm).await;
             }
+            rec_len = 0;
             cursor_shown = false;
             acted = true;
         }
@@ -518,6 +541,13 @@ pub async fn run_input<D, I>(
                 repeat_countdown = REPEAT_INTERVAL_TICKS;
                 acted = true;
             }
+        }
+
+        // 録音中は「Recording...」表示のままにし、カーソル点滅も待ちも省く
+        // （capture_chunk のブロッキングがペース源）。少しだけ譲る。
+        if recording {
+            embassy_time::Timer::after_millis(1).await;
+            continue;
         }
 
         // 入力があった直後はカーソルを点灯状態にして即座に見せる。

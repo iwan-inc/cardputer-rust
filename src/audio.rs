@@ -19,36 +19,40 @@ pub const MAX_SAMPLES: usize = SAMPLE_RATE as usize * RECORD_SECS;
 // 録音バッファ（内部 RAM の固定領域）。単一タスクからのみ触る。
 static mut RECORD_BUF: [i16; MAX_SAMPLES] = [0; MAX_SAMPLES];
 
-/// 固定長を録音し、録音済み PCM（s16le）のバイトスライスを返す。
+/// 1 チャンク（最大 1024 サンプル ≈ 64ms）を録音バッファの `filled` 以降へ
+/// 取り込み、新しい `filled` を返す（バッファ上限で頭打ち）。
 ///
-/// `read_words` は 1 回最大 4096 バイト（2048 サンプル）なのでチャンク読みする。
-/// チャンク毎に少し await して、同居するネットワークタスクにも実行を譲る。
-pub async fn record(i2s_rx: &mut I2sRx<'_, Blocking>) -> &'static [u8] {
+/// I2S は 32bit スロット。16bit データはスロット上位（[31:16]）に載るので
+/// 上位 16bit を取り出す。`read_words` は 1 回最大 4096 バイト = 1024 語。
+/// 1 回のブロッキングは約 64ms。押している間、ループから繰り返し呼ぶ。
+pub fn capture_chunk(i2s_rx: &mut I2sRx<'_, Blocking>, filled: usize) -> usize {
+    if filled >= MAX_SAMPLES {
+        return filled;
+    }
+
     // SAFETY: 録音はキーボードタスクからのみ呼ばれ、多重には走らない。
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RECORD_BUF) };
 
-    // I2S は 32bit スロット。16bit データはスロット上位（[31:16]）に載るので
-    // 上位 16bit を取り出す。read_words は 1 回最大 4096 バイト = 1024 語。
     let mut chunk = [0i32; 1024];
-    let mut filled = 0;
+    let take = core::cmp::min(chunk.len(), MAX_SAMPLES - filled);
 
-    while filled < MAX_SAMPLES {
-        let take = core::cmp::min(chunk.len(), MAX_SAMPLES - filled);
-
-        if i2s_rx.read_words(&mut chunk[..take]).is_err() {
-            break;
-        }
-
-        for (i, &word) in chunk[..take].iter().enumerate() {
-            buf[filled + i] = (word >> 16) as i16;
-        }
-        filled += take;
-
-        // ブロッキング読みの合間に executor へ譲る。
-        embassy_time::Timer::after_millis(1).await;
+    if i2s_rx.read_words(&mut chunk[..take]).is_err() {
+        return filled;
     }
 
-    // 実機デバッグ用の統計（DC/無音なら min≈max になる）。
+    for (i, &word) in chunk[..take].iter().enumerate() {
+        buf[filled + i] = (word >> 16) as i16;
+    }
+
+    filled + take
+}
+
+/// 録音済み `filled` サンプルを PCM（s16le）バイトとして返す。統計もログ出力。
+pub fn pcm_bytes(filled: usize) -> &'static [u8] {
+    // SAFETY: 単一タスクからのみアクセスする。
+    let buf = unsafe { &*core::ptr::addr_of!(RECORD_BUF) };
+
+    // 実機デバッグ用の統計（DC/無音なら min≈max、クリップなら ±32767 に張り付く）。
     let mut min = i16::MAX;
     let mut max = i16::MIN;
     let mut sum: i64 = 0;
@@ -67,6 +71,6 @@ pub async fn record(i2s_rx: &mut I2sRx<'_, Blocking>) -> &'static [u8] {
         filled, min, max, mean
     );
 
-    // s16le の生バイトとして返す（ESP32 はリトルエンディアン）。
+    // s16le の生バイト（ESP32 はリトルエンディアン）。
     unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, filled * 2) }
 }
