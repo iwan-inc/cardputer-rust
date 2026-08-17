@@ -22,6 +22,7 @@
 コマンド（/render の本文）:
     tenki [場所(英字)]   天気（Open-Meteo, APIキー不要）。省略時 Tokyo
     time                 現在時刻（サーバのローカル時刻）
+    ai [質問(英字)]      Claude に質問（要 ANTHROPIC_API_KEY）。日本語で回答
     help                 コマンド一覧
     それ以外              「受信: ...」をエコー
 """
@@ -174,14 +175,55 @@ def cmd_time(arg):
     return now.strftime("現在時刻\n%Y-%m-%d (") + wd + now.strftime(")\n%H:%M:%S")
 
 
+_ANTHROPIC = None
+
+
+def _get_anthropic():
+    """Anthropic クライアントを遅延生成する（ANTHROPIC_API_KEY を読む）。"""
+    global _ANTHROPIC
+    if _ANTHROPIC is None:
+        import anthropic
+
+        _ANTHROPIC = anthropic.Anthropic()
+    return _ANTHROPIC
+
+
+def cmd_ai(arg):
+    """`ai <質問>` で Claude に質問し、日本語の短い回答を返す。"""
+    question = arg.strip()
+    if not question:
+        return "使い方: ai <質問(英字)>"
+
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return "APIキー未設定\nANTHROPIC_API_KEY を\n設定してください"
+
+    client = _get_anthropic()
+    resp = client.messages.create(
+        model="claude-opus-4-8",
+        max_tokens=512,
+        system=(
+            "あなたはカードサイズの小型端末のアシスタント。"
+            "回答は必ず日本語で、要点のみ簡潔に（およそ4行以内、"
+            "各行20文字程度）。前置き・言い訳・繰り返しはしない。"
+            "最終的な答えだけを書く。"
+        ),
+        messages=[{"role": "user", "content": question}],
+    )
+    text = "".join(
+        block.text for block in resp.content if block.type == "text"
+    ).strip()
+    return text or "(回答なし)"
+
+
 def cmd_help(arg):
-    return "コマンド:\ntenki [場所]\ntime\nhelp"
+    return "コマンド:\ntenki [場所]\ntime\nai [質問]\nhelp"
 
 
 # コマンド名(小文字) -> 関数(引数文字列 -> 応答文字列)
 COMMANDS = {
     "tenki": cmd_tenki,
     "time": cmd_time,
+    "ai": cmd_ai,
     "help": cmd_help,
 }
 

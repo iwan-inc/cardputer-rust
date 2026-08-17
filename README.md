@@ -64,6 +64,10 @@ python3 -m venv .venv
 - `POST /stt` — 音声（WAV / 16kHz mono s16le）を faster-whisper で日本語に
   文字起こしして画像で返す（初回はモデルを自動 DL、`WHISPER_MODEL` で切替）
 
+コマンド（`/render` の本文先頭語）: `tenki [場所]` / `time` / `ai [質問]` / `help`。
+`ai` は Claude（`claude-opus-4-8`）に問い合わせて日本語で回答する。使うには
+サーバ起動前に `export ANTHROPIC_API_KEY=sk-ant-...` が必要（未設定なら案内を表示）。
+
 ## 構成
 
 - `src/bin/main.rs` — エントリポイント（ペリフェラル初期化とメイン処理）
