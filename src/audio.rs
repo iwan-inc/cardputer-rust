@@ -14,16 +14,18 @@ use esp_hal::{
 use log::info;
 
 pub const SAMPLE_RATE: u32 = 16000;
-/// 録音の最大秒数。RAM に直結（16kHz*2byte*秒）。
+/// 録音の最大秒数（録音の上限）。
 pub const RECORD_SECS: usize = 3;
-/// 録音バッファのサンプル数。
+/// 録音の最大サンプル数（録音の上限）。
 pub const MAX_SAMPLES: usize = SAMPLE_RATE as usize * RECORD_SECS;
+/// バッファ全体のサンプル数（録音と再生ダウンロードで共用、再生は最大5秒）。
+pub const BUF_SAMPLES: usize = SAMPLE_RATE as usize * 5;
 
 /// 1 回の DMA で扱うサンプル数（<= 4096 バイト = 1024 語）。
 const CHUNK: usize = 1024;
 
-// 録音バッファ（内部 RAM の固定領域）。単一タスクからのみ触る。
-static mut RECORD_BUF: [i16; MAX_SAMPLES] = [0; MAX_SAMPLES];
+// 録音/再生 共用バッファ（内部 RAM の固定領域）。単一タスクからのみ触る。
+static mut RECORD_BUF: [i16; BUF_SAMPLES] = [0; BUF_SAMPLES];
 
 /// i32 バッファをバイトスライスとして見る（DMA API 用）。
 fn as_bytes_mut(buf: &mut [i32]) -> &mut [u8] {
@@ -76,35 +78,84 @@ pub async fn play_tone(i2s_tx: &mut I2sTx<'_, Async>, freq_hz: u32, ms: u32) {
     }
 }
 
-/// 再生 1 書き込みのサンプル数（大きいほど TX 再起動＝クリックが減る）。
-pub const PLAY_SAMPLES: usize = 4096;
-
-// 再生用の静的バッファ（スタック肥大を避ける）。
-static mut PLAY_DMA: [i32; PLAY_SAMPLES] = [0; PLAY_SAMPLES];
-static mut PLAY_ACC: [u8; PLAY_SAMPLES * 2] = [0; PLAY_SAMPLES * 2];
-
-/// ストリーミング再生用の蓄積バッファ（PCM を溜めてから大ブロックで再生）。
-pub fn play_acc() -> &'static mut [u8] {
-    // SAFETY: 再生はキーボードタスクからのみ呼ばれ、多重には走らない。
-    unsafe { &mut *core::ptr::addr_of_mut!(PLAY_ACC) }
+/// ダウンロードした回答音声を置くバッファ（録音バッファを再利用）。
+/// 上限 = MAX_SAMPLES*2 バイト（16kHz で RECORD_SECS 秒）。
+pub fn dl_buf() -> &'static mut [u8] {
+    // SAFETY: 単一タスクからのみアクセス。録音済みデータは送信後なので上書き可。
+    unsafe {
+        core::slice::from_raw_parts_mut(
+            core::ptr::addr_of_mut!(RECORD_BUF) as *mut u8,
+            BUF_SAMPLES * 2,
+        )
+    }
 }
 
-/// s16le の PCM バイト列（<= PLAY_SAMPLES*2）を 1 回の DMA でまとめて再生する。
-/// 大きくまとめることで TX の再起動によるクリック音を減らす。
-pub async fn play_dma_block(i2s_tx: &mut I2sTx<'_, Async>, pcm: &[u8]) {
-    let n = core::cmp::min(pcm.len() / 2, PLAY_SAMPLES);
-    if n == 0 {
+/// 循環 DMA バッファ（i32 語）。DMA が常時ここを読み、push で先へ書き足す。
+const CIRC_WORDS: usize = 2048;
+static mut CIRC: [i32; CIRC_WORDS] = [0; CIRC_WORDS];
+
+/// `dl_buf()` に入れた s16le PCM（先頭 `byte_len` バイト）を、循環 DMA で
+/// 途切れなく（ギャップレス）再生する。再生中はソケット不要なのでアンダーラン
+/// せず、TX も止めない＝クリック/間欠停止が出ない。ブロッキング。
+pub fn play_pcm_gapless(i2s_tx: &mut I2sTx<'_, Async>, byte_len: usize) {
+    let total = byte_len / 2; // サンプル数
+    if total == 0 {
         return;
     }
-    // SAFETY: 単一タスクからのみアクセスする。
-    let dma = unsafe { &mut *core::ptr::addr_of_mut!(PLAY_DMA) };
-    for (j, slot) in dma.iter_mut().take(n).enumerate() {
-        let lo = pcm[j * 2] as u16;
-        let hi = pcm[j * 2 + 1] as u16;
-        let s = (lo | (hi << 8)) as i16;
-        *slot = (s as i32) << 16;
+
+    // 循環バッファを無音で初期化（開始直後に流れる分）。
+    let circ = unsafe { &mut *core::ptr::addr_of_mut!(CIRC) };
+    for w in circ.iter_mut() {
+        *w = 0;
     }
-    let _ = i2s_tx.write_dma_async(as_bytes_mut(&mut dma[..n])).await;
+
+    // PCM のバイト列（RECORD_BUF）を読む。
+    let pcm =
+        unsafe { core::slice::from_raw_parts(core::ptr::addr_of!(RECORD_BUF) as *const u8, byte_len) };
+
+    let circ_ref: &[i32; CIRC_WORDS] = unsafe { &*core::ptr::addr_of!(CIRC) };
+    let mut xfer = match i2s_tx.write_dma_circular(circ_ref) {
+        Ok(x) => x,
+        Err(_) => return,
+    };
+
+    // 実サンプルを push し切る（空きが無ければ closure は 0 を返し、空くまで回る）。
+    let mut pos = 0usize;
+    while pos < total {
+        let r = xfer.push_with(|dst: &mut [u8]| {
+            let words = dst.len() / 4;
+            let take = core::cmp::min(words, total - pos);
+            for j in 0..take {
+                let lo = pcm[(pos + j) * 2] as u16;
+                let hi = pcm[(pos + j) * 2 + 1] as u16;
+                let s = (lo | (hi << 8)) as i16;
+                let w = ((s as i32) << 16).to_le_bytes();
+                dst[j * 4..j * 4 + 4].copy_from_slice(&w);
+            }
+            take * 4
+        });
+        match r {
+            Ok(n) => pos += n / 4,
+            Err(_) => break,
+        }
+    }
+
+    // 末尾を鳴らし切るため、循環バッファ 1 周分の無音を push してから停止。
+    let mut sil = 0usize;
+    while sil < CIRC_WORDS {
+        let r = xfer.push_with(|dst: &mut [u8]| {
+            for b in dst.iter_mut() {
+                *b = 0;
+            }
+            dst.len()
+        });
+        match r {
+            Ok(n) => sil += n / 4,
+            Err(_) => break,
+        }
+    }
+
+    let _ = xfer.stop();
 }
 
 /// 1 チャンク録音して録音バッファの `filled` 以降へ書き、新しい `filled` を返す。

@@ -300,10 +300,10 @@ async fn send_stt<D>(
     editor.reset_to_bottom();
 }
 
-/// `/speak` から回答音声（生 PCM）を取得し、ストリーミングでスピーカー再生する。
+/// `/speak` から回答音声（生 PCM）を取得し、スピーカーで再生する。
 ///
-/// 音声は数十〜百 KB になるため一括では持たず、ソケットから読みながら
-/// チャンク単位で `play_pcm` に流す（再生がソケット読みを律速する）。
+/// ギャップレス再生のため、まず全体をバッファ（`dl_buf`, 上限 3 秒）へ
+/// ダウンロードしてから、循環 DMA で途切れず再生する。上限超過分は切り捨て。
 async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
     let mut rx = [0u8; 2048];
     let mut tx = [0u8; 512];
@@ -327,68 +327,62 @@ async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
         return;
     }
 
-    // レスポンスを読み、ヘッダ（\r\n\r\n まで）を飛ばして本文を再生する。
-    // 本文（PCM）は 2 バイト境界を保ちつつ大ブロック（play_acc 分）に貯めてから
-    // まとめて再生する（端数を取りこぼさない＆TX 再起動＝クリックを減らす）。
-    let mut buf = [0u8; 512];
-    let acc = audio::play_acc();
-    let mut acc_len = 0usize;
-    let mut header_done = false;
-    let mut m = 0u8; // \r\n\r\n のマッチ状態
+    // レスポンスを読み、ヘッダ（\r\n\r\n）以降の本文を dl_buf へ貯める。
+    let mut byte_len = 0usize;
+    {
+        let dl = audio::dl_buf();
+        let mut buf = [0u8; 512];
+        let mut header_done = false;
+        let mut m = 0u8; // \r\n\r\n のマッチ状態
 
-    loop {
-        let n = match socket.read(&mut buf).await {
-            Ok(n) => n,
-            Err(_) => break,
-        };
-        if n == 0 {
-            break;
-        }
+        loop {
+            let n = match socket.read(&mut buf).await {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
 
-        let mut start = 0;
-        if !header_done {
-            let mut i = 0;
-            while i < n {
-                let b = buf[i];
-                m = match (m, b) {
-                    (0, b'\r') => 1,
-                    (1, b'\n') => 2,
-                    (2, b'\r') => 3,
-                    (3, b'\n') => 4,
-                    (_, b'\r') => 1,
-                    _ => 0,
-                };
-                i += 1;
-                if m == 4 {
-                    header_done = true;
-                    start = i;
-                    break;
+            let mut start = 0;
+            if !header_done {
+                let mut i = 0;
+                while i < n {
+                    let b = buf[i];
+                    m = match (m, b) {
+                        (0, b'\r') => 1,
+                        (1, b'\n') => 2,
+                        (2, b'\r') => 3,
+                        (3, b'\n') => 4,
+                        (_, b'\r') => 1,
+                        _ => 0,
+                    };
+                    i += 1;
+                    if m == 4 {
+                        header_done = true;
+                        start = i;
+                        break;
+                    }
+                }
+                if !header_done {
+                    continue;
                 }
             }
-            if !header_done {
-                continue;
-            }
-        }
 
-        // 本文バイトを acc に貯め、満杯になったら大ブロックで再生する。
-        let mut off = start;
-        while off < n {
-            let take = core::cmp::min(acc.len() - acc_len, n - off);
-            acc[acc_len..acc_len + take].copy_from_slice(&buf[off..off + take]);
-            acc_len += take;
-            off += take;
-            if acc_len == acc.len() {
-                audio::play_dma_block(i2s_tx, acc).await;
-                acc_len = 0;
+            let take = core::cmp::min(dl.len() - byte_len, n - start);
+            if take > 0 {
+                dl[byte_len..byte_len + take]
+                    .copy_from_slice(&buf[start..start + take]);
+                byte_len += take;
+            }
+            if byte_len == dl.len() {
+                break; // 上限（3秒）に達したら以降は捨てる
             }
         }
     }
 
-    // 残り（2 バイト境界まで）を再生する。
-    let even = acc_len & !1;
-    if even >= 2 {
-        audio::play_dma_block(i2s_tx, &acc[..even]).await;
-    }
+    // ダウンロード完了 → 途切れなく再生。
+    audio::play_pcm_gapless(i2s_tx, byte_len);
 }
 
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
