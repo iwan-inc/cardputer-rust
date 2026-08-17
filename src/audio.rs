@@ -14,8 +14,8 @@ use esp_hal::{
 use log::info;
 
 pub const SAMPLE_RATE: u32 = 16000;
-/// 録音の最大秒数（録音の上限）。
-pub const RECORD_SECS: usize = 3;
+/// 録音の最大秒数（録音の上限）。バッファ(6秒)内なので再生と競合しない。
+pub const RECORD_SECS: usize = 4;
 /// 録音の最大サンプル数（録音の上限）。
 pub const MAX_SAMPLES: usize = SAMPLE_RATE as usize * RECORD_SECS;
 /// バッファ全体のサンプル数（録音と再生ダウンロードで共用、再生は最大6秒）。
@@ -147,12 +147,15 @@ pub async fn capture_chunk(
         return filled;
     }
 
-    // RX は 512、TX 無音は RX の 2 倍流す。TX クロックが RX 読み出し中に
-    // 途切れないよう、TX を長めにして最後まで供給する。
-    let take = core::cmp::min(512, MAX_SAMPLES - filled);
+    // RX を大きめ（最大 1024=64ms）に読む。TX 無音は RX よりわずかに長い
+    // だけにする。以前は TX を RX の 2 倍流し join で両方待っていたため、
+    // 64ms かけて 32ms しか録音できず（約半分を取りこぼし・時間 2 倍圧縮）
+    // whisper が誤認識していた。TX を「RX + 少しの余白」にすると、クロックは
+    // RX 完了まで確実に供給されつつ、取りこぼしがほぼ無くなる。
+    let take = core::cmp::min(CHUNK, MAX_SAMPLES - filled);
     let mut chunk = [0i32; CHUNK];
-    let mut silent = [0i32; CHUNK];
-    let tx_len = core::cmp::min(CHUNK, take * 2);
+    let mut silent = [0i32; CHUNK + 128];
+    let tx_len = core::cmp::min(silent.len(), take + 128);
 
     // TX(無音)でクロックを供給しつつ RX(取り込み)を同時実行。
     // ハードフリーズ防止のためタイムアウトを付ける。

@@ -444,7 +444,7 @@ pub async fn run_input<D, I>(
         let mut tone_requested = false;
         let mut stop_send = false;
 
-        // 録音中は 1 チャンク（約64ms）取り込む。満杯なら自動停止して送信。
+        // 録音中は 1 チャンク（約64ms 分）取り込む。満杯なら自動停止して送信。
         if recording {
             rec_len = audio::capture_chunk(i2s_rx, i2s_tx, rec_len).await;
             if rec_len >= audio::MAX_SAMPLES {
