@@ -6,7 +6,7 @@
 
 use esp_hal::{
     Blocking,
-    i2s::master::I2sRx,
+    i2s::master::{I2sRx, I2sTx},
 };
 use log::info;
 
@@ -45,6 +45,38 @@ pub fn capture_chunk(i2s_rx: &mut I2sRx<'_, Blocking>, filled: usize) -> usize {
     }
 
     filled + take
+}
+
+/// スピーカー検証用に矩形波のテスト音を鳴らす（`freq_hz`, `ms` ミリ秒）。
+///
+/// I2S は 32bit スロット。16bit サンプルを上位に載せる（sample << 16）。
+/// `write_words` は 1 回最大 4096 バイト = 1024 語。
+pub fn play_tone(i2s_tx: &mut I2sTx<'_, Blocking>, freq_hz: u32, ms: u32) {
+    const AMP: i16 = 8000;
+    let half = (SAMPLE_RATE / freq_hz / 2).max(1); // 半周期のサンプル数
+    let total = (SAMPLE_RATE as u64 * ms as u64 / 1000) as usize;
+
+    let mut chunk = [0i32; 1024];
+    let mut phase = 0u32;
+    let mut done = 0;
+
+    info!("play_tone {}Hz {}ms", freq_hz, ms);
+
+    while done < total {
+        let n = core::cmp::min(chunk.len(), total - done);
+        for slot in chunk.iter_mut().take(n) {
+            let s = if phase < half { AMP } else { -AMP };
+            *slot = (s as i32) << 16;
+            phase += 1;
+            if phase >= half * 2 {
+                phase = 0;
+            }
+        }
+        if i2s_tx.write_words(&chunk[..n]).is_err() {
+            break;
+        }
+        done += n;
+    }
 }
 
 /// 録音済み `filled` サンプルを PCM（s16le）バイトとして返す。統計もログ出力。

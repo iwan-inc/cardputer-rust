@@ -69,6 +69,17 @@ impl<I2C: I2c> Es8311<I2C> {
         self.write(0x00, 0x80)?; // 再度パワーオン確定
         Ok(())
     }
+
+    /// スピーカー（DAC）出力を有効化する。init_mic のクロック設定を前提に、
+    /// DAC の電源・出力・音量だけ設定する（M5Unified の有効化列を参考）。
+    /// アンプ(NS4150B)専用の有効化 GPIO は無く、ES8311 の設定のみで鳴る。
+    pub fn init_speaker(&mut self) -> Result<(), I2C::Error> {
+        self.write(0x12, 0x00)?; // DAC パワーアップ
+        self.write(0x13, 0x10)?; // 出力有効
+        self.write(0x32, 0xBF)?; // DAC 音量 0dB（要調整）
+        self.write(0x37, 0x08)?; // DAC EQ バイパス
+        Ok(())
+    }
 }
 
 /// I2C レジスタ設定間の粗いディレイ（リセット待ち用）。

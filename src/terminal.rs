@@ -23,7 +23,7 @@ use embedded_graphics::{
 use embedded_hal::i2c::I2c;
 use esp_hal::{
     Blocking,
-    i2s::master::I2sRx,
+    i2s::master::{I2sRx, I2sTx},
     system::software_reset,
 };
 use esp_radio::wifi::WifiController;
@@ -313,6 +313,7 @@ pub async fn run_input<D, I>(
     stack: Option<Stack<'_>>,
     controller: &mut WifiController<'_>,
     i2s_rx: &mut I2sRx<'_, Blocking>,
+    i2s_tx: &mut I2sTx<'_, Blocking>,
 ) where
     D: DrawTarget<Color = Rgb565>,
     I: I2c,
@@ -350,6 +351,7 @@ pub async fn run_input<D, I>(
         let mut send_requested = false;
         let mut scan_requested = false;
         let mut ip_requested = false;
+        let mut tone_requested = false;
         let mut stop_send = false;
 
         // 録音中は 1 チャンク（約64ms）取り込む。満杯なら自動停止して送信。
@@ -409,6 +411,10 @@ pub async fn run_input<D, I>(
                                     held = None;
                                 } else if fn_down && base == 'i' {
                                     ip_requested = true;
+                                    held = None;
+                                } else if fn_down && base == 'p' {
+                                    // Fn+P でスピーカー検証用のテスト音。
+                                    tone_requested = true;
                                     held = None;
                                 } else if fn_down
                                     && (base == ' ' || base == 'a')
@@ -502,6 +508,15 @@ pub async fn run_input<D, I>(
             }
 
             // IP 表示は上部に出るので、カーソルは最下行へ。
+            editor.reset_to_bottom();
+            cursor_shown = false;
+            acted = true;
+        }
+
+        // Fn+P によるスピーカー検証用テスト音（440Hz, 500ms）。
+        if tone_requested {
+            let _ = ui::show_message(display, style, "Beep...");
+            audio::play_tone(i2s_tx, 440, 500);
             editor.reset_to_bottom();
             cursor_shown = false;
             acted = true;

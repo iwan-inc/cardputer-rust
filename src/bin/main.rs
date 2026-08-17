@@ -189,6 +189,10 @@ async fn main(_spawner: Spawner) {
         Ok(()) => info!("ES8311 mic initialized"),
         Err(e) => info!("ES8311 init failed: {:?}", e),
     }
+    match es8311.init_speaker() {
+        Ok(()) => info!("ES8311 speaker initialized"),
+        Err(e) => info!("ES8311 speaker init failed: {:?}", e),
+    }
     let i2c = es8311.into_inner();
 
     let mut keypad = Tca8418::new(i2c);
@@ -196,8 +200,12 @@ async fn main(_spawner: Spawner) {
 
     info!("Keyboard initialized");
 
-    // マイク用 I2S RX（BCK=41, WS=43, DIN=46, モノラル左, 16kHz/16bit）。
-    let (_, i2s_rx_descriptors, _, _) = esp_hal::dma_buffers!(4096, 0);
+    // I2S（録音 RX と再生 TX を同一 I2S0 で共有）。
+    // クロックは同じ（BCLK=41, WS=43, 32bit/16kHz）。ピン競合を避けるため
+    // BCLK/WS は TX 側で設定し、RX は DIN のみ。録音と再生は同時に使わない。
+    // マイク DIN=46, スピーカー DOUT=42（鳴らなければ 21 を試す）。
+    let (_, i2s_rx_descriptors, _, i2s_tx_descriptors) =
+        esp_hal::dma_buffers!(4096, 4096);
     let i2s = I2s::new(
         peripherals.I2S0,
         peripherals.DMA_CH0,
@@ -209,10 +217,14 @@ async fn main(_spawner: Spawner) {
             .with_channels(I2sChannels::LEFT),
     )
     .unwrap();
-    let mut i2s_rx = i2s
-        .i2s_rx
+    let mut i2s_tx = i2s
+        .i2s_tx
         .with_bclk(peripherals.GPIO41)
         .with_ws(peripherals.GPIO43)
+        .with_dout(peripherals.GPIO42)
+        .build(i2s_tx_descriptors);
+    let mut i2s_rx = i2s
+        .i2s_rx
         .with_din(peripherals.GPIO46)
         .build(i2s_rx_descriptors);
 
@@ -386,6 +398,7 @@ async fn main(_spawner: Spawner) {
                 Some(stack),
                 &mut wifi_controller,
                 &mut i2s_rx,
+                &mut i2s_tx,
             )
             .await;
         })
@@ -414,6 +427,7 @@ async fn main(_spawner: Spawner) {
             None,
             &mut wifi_controller,
             &mut i2s_rx,
+            &mut i2s_tx,
         )
         .await;
     }
