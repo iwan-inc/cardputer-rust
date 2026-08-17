@@ -14,6 +14,10 @@
 文字起こしモデルは環境変数 WHISPER_MODEL で切替（既定 small）。
 初回の /stt 呼び出し時にモデルを自動ダウンロードする。
 
+ai/ask には ANTHROPIC_API_KEY が必要。環境変数か、server.py と同じ
+ディレクトリの .env（KEY=VALUE 形式、git 管理外）で設定する。
+環境変数が優先。
+
 セットアップと起動（Pillow を入れた venv で起動する）:
     cd server
     python3 -m venv .venv
@@ -42,6 +46,34 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
+
+
+def _load_dotenv():
+    """server.py と同じディレクトリの .env を読み、未設定の環境変数だけ設定する。
+
+    シェルの環境変数が優先（既にあれば上書きしない）。`KEY=VALUE` 形式、
+    先頭 # はコメント、値の前後のクォートは除去する。これにより
+    `~/.zshrc` の読み込み有無に依存せず ANTHROPIC_API_KEY を渡せる。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except OSError:
+        pass
+
+
+_load_dotenv()
 
 # LCD の解像度（デバイス側と一致させること）。
 WIDTH, HEIGHT = 240, 135
@@ -197,7 +229,7 @@ def cmd_ai(arg):
         return "使い方: ai <質問(英字)>"
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        return "APIキー未設定\nANTHROPIC_API_KEY を\n設定してください"
+        return "APIキー未設定\nserver/.env か環境変数\nで設定してください"
 
     now = datetime.now()
     wd = WEEKDAYS_JA[now.weekday()]

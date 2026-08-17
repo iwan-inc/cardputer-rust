@@ -34,3 +34,6 @@ target/
 
 # Debug audio dump
 /server/last_stt.wav
+
+# Server secrets (ANTHROPIC_API_KEY etc.)
+/server/.env

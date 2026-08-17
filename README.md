@@ -66,8 +66,15 @@ python3 -m venv .venv
   文字起こしして画像で返す（初回はモデルを自動 DL、`WHISPER_MODEL` で切替）
 
 コマンド（`/render` の本文先頭語）: `tenki [場所]` / `time` / `ai [質問]` / `help`。
-`ai` は Claude（`claude-opus-4-8`）に問い合わせて日本語で回答する。使うには
-サーバ起動前に `export ANTHROPIC_API_KEY=sk-ant-...` が必要（未設定なら案内を表示）。
+`ai` は Claude（`claude-opus-4-8`）に問い合わせて日本語で回答する。要
+`ANTHROPIC_API_KEY`。設定方法は2通り（環境変数が優先）:
+
+```sh
+# 方法A: server/.env に書く（推奨・シェル非依存、git 管理外）
+cp server/.env.example server/.env   # 値を実キーに編集
+# 方法B: 環境変数
+export ANTHROPIC_API_KEY=sk-ant-...
+```
 
 ## 構成
 
