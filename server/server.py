@@ -240,26 +240,72 @@ def cmd_ai(arg):
     wd = WEEKDAYS_JA[now.weekday()]
     today = now.strftime(f"%Y年%m月%d日（{wd}）%H:%M")
 
-    client = _get_anthropic()
-    resp = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=512,
-        system=(
-            f"現在の日時は {today}（サーバのローカル時刻）。"
-            "日付や時刻に関する質問にはこれを基準に答える。"
-            "あなたはカードサイズの小型端末の音声アシスタント。"
-            "回答は必ず日本語で、2〜3文・全体でおよそ60文字以内に収める"
-            "（音声で読み上げるため簡潔に。必要なら一言の補足はよいが冗長にしない）。"
-            "前置き・言い訳・繰り返しはしない。最終的な答えだけを書く。"
-            "\n出力は必ず次の2行構成にする:"
-            "\n1行目: 表示用の回答（通常の漢字かな交じり）。"
-            "\n2行目: 『よみ:』に続けて、1行目の全文の読みをひらがなで書く"
-            "（音声合成用。漢字・数字・記号もすべて読み方をひらがなに。"
-            "例: 富士山→ふじさん、3776m→さんぜんななひゃくななじゅうろくめーとる、"
-            "17日→じゅうしちにち）。"
-        ),
-        messages=[{"role": "user", "content": question}],
+    system = (
+        f"現在の日時は {today}（サーバのローカル時刻）。"
+        "日付や時刻に関する質問にはこれを基準に答える。"
+        "あなたはカードサイズの小型端末の音声アシスタント。"
+        "天気を聞かれたら get_weather ツールを使って実際の天気で答える"
+        "（location は英語/ローマ字で渡す。例: 大阪→Osaka, 札幌→Sapporo。"
+        "省略時は Tokyo）。"
+        "回答は必ず日本語で、2〜3文・全体でおよそ60文字以内に収める"
+        "（音声で読み上げるため簡潔に。必要なら一言の補足はよいが冗長にしない）。"
+        "前置き・言い訳・繰り返しはしない。最終的な答えだけを書く。"
+        "\n出力は必ず次の2行構成にする:"
+        "\n1行目: 表示用の回答（通常の漢字かな交じり）。"
+        "\n2行目: 『よみ:』に続けて、1行目の全文の読みをひらがなで書く"
+        "（音声合成用。漢字・数字・記号もすべて読み方をひらがなに。"
+        "例: 富士山→ふじさん、3776m→さんぜんななひゃくななじゅうろくめーとる、"
+        "17日→じゅうしちにち、28℃→にじゅうはちど）。"
     )
+    tools = [
+        {
+            "name": "get_weather",
+            "description": (
+                "指定した場所の現在の天気と今日の予報（気温・天気）を取得する。"
+                "天気について聞かれたら必ずこれを使う。"
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": (
+                            "地名を英語/ローマ字で。例: Osaka, Tokyo, Sapporo。"
+                            "（ジオコーディングが日本語漢字では一致しないため）"
+                        ),
+                    }
+                },
+                "required": ["location"],
+            },
+        }
+    ]
+
+    client = _get_anthropic()
+    messages = [{"role": "user", "content": question}]
+    # ツール利用ループ（get_weather を最大数回まで実行）。
+    for _ in range(4):
+        resp = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=512,
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+        if resp.stop_reason != "tool_use":
+            break
+        messages.append({"role": "assistant", "content": resp.content})
+        results = []
+        for block in resp.content:
+            if block.type == "tool_use" and block.name == "get_weather":
+                loc = (block.input or {}).get("location", "Tokyo")
+                print(f"  tool get_weather({loc!r})", flush=True)
+                results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": cmd_tenki(loc),
+                })
+        messages.append({"role": "user", "content": results})
+
     text = "".join(
         block.text for block in resp.content if block.type == "text"
     ).strip()
