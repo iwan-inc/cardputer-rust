@@ -9,6 +9,9 @@
                  faster-whisper で日本語に文字起こしして画像で返す。
 - POST /ask    : 音声を文字起こしし、その内容を Claude に質問して
                  回答（日本語）を画像で返す（要 ANTHROPIC_API_KEY）。
+                 回答は macOS say で音声合成して保持する。
+- GET  /speak  : 直近の回答音声（16kHz/mono/s16le の生 PCM）を返す。
+                 デバイスがストリーミング再生する。
 - POST (その他) : 本文をコンソール表示し、確認メッセージを返す。
 
 文字起こしモデルは環境変数 WHISPER_MODEL で切替（既定 small）。
@@ -35,7 +38,9 @@ ai/ask には ANTHROPIC_API_KEY が必要。環境変数か、server.py と同�
 import io
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 import wave
@@ -361,7 +366,54 @@ def transcribe(data):
     return text or "（認識できませんでした）"
 
 
+# ---- 音声合成（TTS: macOS say）----
+
+# 直近の回答音声（16kHz/mono/s16le の生 PCM）。/speak で配信する。
+_LAST_TTS = b""
+
+
+def _synthesize_tts(text):
+    """text を音声合成し 16kHz/mono/s16le の生 PCM を返す（macOS say）。"""
+    text = text.strip()
+    if not text:
+        return b""
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            aiff = os.path.join(d, "s.aiff")
+            wavp = os.path.join(d, "s.wav")
+            subprocess.run(
+                ["say", "-v", "Kyoko", "-o", aiff, text],
+                check=True,
+                timeout=30,
+            )
+            subprocess.run(
+                ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1",
+                 aiff, wavp],
+                check=True,
+                timeout=30,
+            )
+            with wave.open(wavp, "rb") as w:
+                return w.readframes(w.getnframes())
+    except Exception as e:
+        print(f"  tts failed: {e}", flush=True)
+        return b""
+
+
 class Handler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/speak":
+            # 直近の回答音声（生 PCM）を配信する。
+            payload = _LAST_TTS
+            print(f"[GET /speak] {len(payload)} bytes", flush=True)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        super().do_GET()
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b""
@@ -382,6 +434,10 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"  STT -> {question!r}", flush=True)
             answer = cmd_ai(question)
             print(f"  AI  -> {answer!r}", flush=True)
+            # 回答を音声合成して保持（デバイスが /speak で取得して再生）。
+            global _LAST_TTS
+            _LAST_TTS = _synthesize_tts(answer)
+            print(f"  TTS -> {len(_LAST_TTS)} bytes", flush=True)
             payload = render_text_1bpp(answer)
             content_type = "application/octet-stream"
         elif self.path == "/render":

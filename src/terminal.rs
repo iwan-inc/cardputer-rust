@@ -300,6 +300,78 @@ async fn send_stt<D>(
     editor.reset_to_bottom();
 }
 
+/// `/speak` から回答音声（生 PCM）を取得し、ストリーミングでスピーカー再生する。
+///
+/// 音声は数十〜百 KB になるため一括では持たず、ソケットから読みながら
+/// チャンク単位で `play_pcm` に流す（再生がソケット読みを律速する）。
+async fn play_answer(stack: Stack<'_>, i2s_tx: &mut I2sTx<'_, Async>) {
+    let mut rx = [0u8; 2048];
+    let mut tx = [0u8; 512];
+    let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+
+    if socket
+        .connect((config::SERVER_IP, config::SERVER_PORT))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut req_buf = [0u8; 96];
+    let req = net::write_get_request(
+        &mut req_buf,
+        config::SPEAK_PATH,
+        config::SERVER_HOST,
+    );
+    if socket.write(req).await.is_err() || socket.flush().await.is_err() {
+        return;
+    }
+
+    // レスポンスを読み、ヘッダ（\r\n\r\n まで）を飛ばして本文を再生する。
+    let mut buf = [0u8; 512];
+    let mut header_done = false;
+    let mut m = 0u8; // \r\n\r\n のマッチ状態
+
+    loop {
+        let n = match socket.read(&mut buf).await {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if n == 0 {
+            break;
+        }
+
+        let mut start = 0;
+        if !header_done {
+            let mut i = 0;
+            while i < n {
+                let b = buf[i];
+                m = match (m, b) {
+                    (0, b'\r') => 1,
+                    (1, b'\n') => 2,
+                    (2, b'\r') => 3,
+                    (3, b'\n') => 4,
+                    (_, b'\r') => 1,
+                    _ => 0,
+                };
+                i += 1;
+                if m == 4 {
+                    header_done = true;
+                    start = i;
+                    break;
+                }
+            }
+            if !header_done {
+                continue;
+            }
+        }
+
+        if start < n {
+            audio::play_pcm(i2s_tx, &buf[start..n]).await;
+        }
+    }
+}
+
 /// キーボード入力ループ。戻らない（端末が動いている間ずっと動作）。
 ///
 /// `stack` が `Some` のときは Enter で入力を POST 送信し、応答を表示する。
@@ -339,6 +411,11 @@ pub async fn run_input<D, I>(
     let mut rec_key: (u8, u8) = (0, 0);
     // 録音を /ask（AIに質問）へ送るか、/stt（文字起こしのみ）へ送るか。
     let mut rec_is_ask = false;
+
+    // 起動時に残っているキーイベントを空読みして誤トリガを防ぐ。
+    if let Ok(events) = keypad.events() {
+        for _ in events {}
+    }
 
     loop {
         // 入力やカーソル描画の前に、表示中のカーソルを消して土台を綺麗にする。
@@ -542,6 +619,11 @@ pub async fn run_input<D, I>(
                     config::STT_PATH
                 };
                 send_stt(&mut editor, display, style, stack, pcm, path).await;
+
+                // Fn+A（AI質問）のときは回答を音声でも読み上げる。
+                if rec_is_ask {
+                    play_answer(stack, i2s_tx).await;
+                }
             }
             rec_len = 0;
             cursor_shown = false;

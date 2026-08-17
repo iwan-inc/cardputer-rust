@@ -37,3 +37,6 @@ pub const STT_PATH: &str = "/stt";
 
 /// 録音音声を送り、文字起こし→AI回答の画像を受け取るパス。
 pub const ASK_PATH: &str = "/ask";
+
+/// 直近の回答音声（生 PCM）を取得するパス（GET）。
+pub const SPEAK_PATH: &str = "/speak";
