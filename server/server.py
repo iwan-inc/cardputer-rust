@@ -7,6 +7,8 @@
                  そのまま LCD に転送する。
 - POST /stt    : 音声（WAV か 16kHz/mono/s16le の生 PCM）を受け取り、
                  faster-whisper で日本語に文字起こしして画像で返す。
+- POST /ask    : 音声を文字起こしし、その内容を Claude に質問して
+                 回答（日本語）を画像で返す（要 ANTHROPIC_API_KEY）。
 - POST (その他) : 本文をコンソール表示し、確認メッセージを返す。
 
 文字起こしモデルは環境変数 WHISPER_MODEL で切替（既定 small）。
@@ -333,6 +335,16 @@ class Handler(SimpleHTTPRequestHandler):
             text = transcribe(body)
             print(f"  -> {text!r}", flush=True)
             payload = render_text_1bpp(f"認識: {text}")
+            content_type = "application/octet-stream"
+        elif self.path == "/ask":
+            # 音声を文字起こしし、その内容を Claude に質問して回答を返す。
+            print(f"[POST /ask] {len(body)} bytes", flush=True)
+            _save_debug_wav(body)
+            question = transcribe(body)
+            print(f"  STT -> {question!r}", flush=True)
+            answer = cmd_ai(question)
+            print(f"  AI  -> {answer!r}", flush=True)
+            payload = render_text_1bpp(answer)
             content_type = "application/octet-stream"
         elif self.path == "/render":
             text = body.decode("utf-8", errors="replace")

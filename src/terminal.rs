@@ -264,6 +264,7 @@ async fn send_stt<D>(
     style: MonoTextStyle<'_, Rgb565>,
     stack: Stack<'_>,
     pcm: &[u8],
+    path: &str,
 ) where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -279,7 +280,7 @@ async fn send_stt<D>(
         &mut socket,
         config::SERVER_IP,
         config::SERVER_PORT,
-        config::STT_PATH,
+        path,
         config::SERVER_HOST,
         pcm,
         &mut response,
@@ -331,10 +332,12 @@ pub async fn run_input<D, I>(
     let mut blink_ticks: u32 = 0;
     let mut cursor_shown = false;
 
-    // 録音状態（Fn+Space を押している間だけ録音、離したら送信）。
+    // 録音状態（Fn+Space / Fn+A を押している間だけ録音、離したら送信）。
     let mut recording = false;
     let mut rec_len: usize = 0;
     let mut rec_key: (u8, u8) = (0, 0);
+    // 録音を /ask（AIに質問）へ送るか、/stt（文字起こしのみ）へ送るか。
+    let mut rec_is_ask = false;
 
     loop {
         // 入力やカーソル描画の前に、表示中のカーソルを消して土台を綺麗にする。
@@ -407,15 +410,23 @@ pub async fn run_input<D, I>(
                                 } else if fn_down && base == 'i' {
                                     ip_requested = true;
                                     held = None;
-                                } else if fn_down && base == ' ' {
-                                    // Fn+Space を押している間だけ録音する。
+                                } else if fn_down
+                                    && (base == ' ' || base == 'a')
+                                {
+                                    // Fn+Space=文字起こし / Fn+A=AIに質問。
+                                    // 押している間だけ録音する。
                                     if stack.is_some() && !recording {
                                         recording = true;
                                         rec_len = 0;
                                         rec_key = (key.row, key.col);
-                                        let _ = ui::show_message(
-                                            display, style, "Recording...",
-                                        );
+                                        rec_is_ask = base == 'a';
+                                        let msg = if rec_is_ask {
+                                            "Ask... (speak)"
+                                        } else {
+                                            "Recording..."
+                                        };
+                                        let _ =
+                                            ui::show_message(display, style, msg);
                                         cursor_shown = false;
                                     }
                                     held = None;
@@ -505,11 +516,17 @@ pub async fn run_input<D, I>(
             }
         }
 
-        // 録音キーを離した（または満杯）→ 録音を送信して文字起こし。
+        // 録音キーを離した（または満杯）→ 録音を送信。
+        // Fn+A なら /ask（AI回答）、Fn+Space なら /stt（文字起こし）。
         if stop_send {
             if let Some(stack) = stack {
                 let pcm = audio::pcm_bytes(rec_len);
-                send_stt(&mut editor, display, style, stack, pcm).await;
+                let path = if rec_is_ask {
+                    config::ASK_PATH
+                } else {
+                    config::STT_PATH
+                };
+                send_stt(&mut editor, display, style, stack, pcm, path).await;
             }
             rec_len = 0;
             cursor_shown = false;

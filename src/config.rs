@@ -34,3 +34,6 @@ pub const RENDER_PATH: &str = "/render";
 
 /// 録音音声を送り、文字起こし結果の画像を受け取るパス。
 pub const STT_PATH: &str = "/stt";
+
+/// 録音音声を送り、文字起こし→AI回答の画像を受け取るパス。
+pub const ASK_PATH: &str = "/ask";

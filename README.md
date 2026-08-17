@@ -20,7 +20,8 @@ M5Stack Cardputer Adv (ESP32-S3) 用の Rust `no_std` プロジェクト。
 | Fn + Del | 全消去 |
 | Fn + W | アクセスポイント一覧 |
 | Fn + I | IP アドレス表示 |
-| Fn + Space | マイク録音（約3秒）→ 文字起こし（実験的） |
+| Fn + Space | 押している間マイク録音 → 文字起こし |
+| Fn + A | 押している間マイク録音 → 文字起こし → Claude に質問し回答 |
 | Fn + R | 再起動 |
 
 ## セットアップ
