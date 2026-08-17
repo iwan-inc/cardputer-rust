@@ -251,13 +251,32 @@ def cmd_ai(arg):
             "回答は必ず日本語で、1〜2文・全体でおよそ40文字以内に収める"
             "（音声で読み上げるため簡潔に）。前置き・言い訳・繰り返しはしない。"
             "最終的な答えだけを書く。"
+            "\n出力は必ず次の2行構成にする:"
+            "\n1行目: 表示用の回答（通常の漢字かな交じり）。"
+            "\n2行目: 『よみ:』に続けて、1行目の全文の読みをひらがなで書く"
+            "（音声合成用。漢字・数字・記号もすべて読み方をひらがなに。"
+            "例: 富士山→ふじさん、3776m→さんぜんななひゃくななじゅうろくめーとる、"
+            "17日→じゅうしちにち）。"
         ),
         messages=[{"role": "user", "content": question}],
     )
     text = "".join(
         block.text for block in resp.content if block.type == "text"
     ).strip()
-    return text or "(回答なし)"
+
+    # 表示用(漢字)と読み上げ用(かな)を分離する。『よみ:』以降が読み。
+    global _LAST_READING
+    display = text
+    reading = text
+    marker = text.find("よみ:")
+    if marker == -1:
+        marker = text.find("よみ：")  # 全角コロンも許容
+    if marker != -1:
+        display = text[:marker].strip()
+        reading = text[marker:].split(":", 1)[-1]
+        reading = reading.split("：", 1)[-1].strip()
+    _LAST_READING = reading or display
+    return display or "(回答なし)"
 
 
 def cmd_help(arg):
@@ -371,6 +390,9 @@ def transcribe(data):
 # 直近の回答音声（16kHz/mono/s16le の生 PCM）。/speak で配信する。
 _LAST_TTS = b""
 
+# 直近の回答の読み上げ用テキスト（cmd_ai がひらがな読みをセット）。
+_LAST_READING = ""
+
 
 def _synthesize_tts(text):
     """text を音声合成し 16kHz/mono/s16le の生 PCM を返す（macOS say）。"""
@@ -432,11 +454,13 @@ class Handler(SimpleHTTPRequestHandler):
             _save_debug_wav(body)
             question = transcribe(body)
             print(f"  STT -> {question!r}", flush=True)
-            answer = cmd_ai(question)
+            answer = cmd_ai(question)  # 副作用で _LAST_READING(かな) をセット
             print(f"  AI  -> {answer!r}", flush=True)
-            # 回答を音声合成して保持（デバイスが /speak で取得して再生）。
+            print(f"  YOMI-> {_LAST_READING!r}", flush=True)
+            # 読み上げ用（ひらがな）を音声合成して保持。漢字誤読を防ぐため
+            # 表示用の漢字ではなく _LAST_READING を合成する。
             global _LAST_TTS
-            _LAST_TTS = _synthesize_tts(answer)
+            _LAST_TTS = _synthesize_tts(_LAST_READING or answer)
             print(f"  TTS -> {len(_LAST_TTS)} bytes", flush=True)
             payload = render_text_1bpp(answer)
             content_type = "application/octet-stream"
