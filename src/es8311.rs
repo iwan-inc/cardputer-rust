@@ -37,15 +37,20 @@ impl<I2C: I2c> Es8311<I2C> {
         self.write(0x00, 0x00)?;
         self.write(0x00, 0x80)?; // パワーオン
 
-        // クロックマネージャ（16kHz, reg01 BIT7 = BCLK を MCLK として使用）
+        // クロックマネージャ。
+        // BCLK を MCLK として使う（reg01 BIT7）。I2S は 32bit フレーム
+        // （channel=32bit, 2ch, 16kHz）= BCLK 1.024MHz にするので、
+        // ES8311 係数表の mclk=1024000 / rate=16000 行を使う。
+        // {pre_div=1, pre_multi=4, adc_div=1, dac_div=1, fs_mode=0,
+        //  lrck=0x00FF, bclk_div=4, adc_osr=0x10, dac_osr=0x10}
         self.write(0x01, 0xBF)?;
-        self.write(0x02, 0x28)?;
-        self.write(0x03, 0x10)?;
-        self.write(0x04, 0x10)?;
-        self.write(0x05, 0x00)?;
-        self.write(0x06, 0x04)?;
-        self.write(0x07, 0x00)?;
-        self.write(0x08, 0xFF)?;
+        self.write(0x02, 0x10)?; // pre_div=1, pre_multi=4
+        self.write(0x03, 0x10)?; // fs_mode=0, adc_osr=0x10
+        self.write(0x04, 0x10)?; // dac_osr=0x10
+        self.write(0x05, 0x00)?; // adc_div=1, dac_div=1
+        self.write(0x06, 0x03)?; // bclk_div=4
+        self.write(0x07, 0x00)?; // lrck_h
+        self.write(0x08, 0xFF)?; // lrck_l
 
         // フォーマット（16bit）
         self.write(0x09, 0x0C)?;

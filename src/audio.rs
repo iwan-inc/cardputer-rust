@@ -27,7 +27,9 @@ pub async fn record(i2s_rx: &mut I2sRx<'_, Blocking>) -> &'static [u8] {
     // SAFETY: 録音はキーボードタスクからのみ呼ばれ、多重には走らない。
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(RECORD_BUF) };
 
-    let mut chunk = [0i16; 2048];
+    // I2S は 32bit スロット。16bit データはスロット上位（[31:16]）に載るので
+    // 上位 16bit を取り出す。read_words は 1 回最大 4096 バイト = 1024 語。
+    let mut chunk = [0i32; 1024];
     let mut filled = 0;
 
     while filled < MAX_SAMPLES {
@@ -37,10 +39,12 @@ pub async fn record(i2s_rx: &mut I2sRx<'_, Blocking>) -> &'static [u8] {
             break;
         }
 
-        buf[filled..filled + take].copy_from_slice(&chunk[..take]);
+        for (i, &word) in chunk[..take].iter().enumerate() {
+            buf[filled + i] = (word >> 16) as i16;
+        }
         filled += take;
 
-        // 128ms 分のブロッキング読みの合間に executor へ譲る。
+        // ブロッキング読みの合間に executor へ譲る。
         embassy_time::Timer::after_millis(1).await;
     }
 

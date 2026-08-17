@@ -201,9 +201,11 @@ async fn main(_spawner: Spawner) {
     let i2s = I2s::new(
         peripherals.I2S0,
         peripherals.DMA_CH0,
+        // 32bit チャンネル幅で BCLK=1.024MHz（=64*fs）。ES8311 はこれを
+        // MCLK として使う（16bit データが 32bit スロットの上位に載る）。
         I2sConfig::new_tdm_philips()
             .with_sample_rate(Rate::from_hz(16000))
-            .with_data_format(I2sDataFormat::Data16Channel16)
+            .with_data_format(I2sDataFormat::Data32Channel32)
             .with_channels(I2sChannels::LEFT),
     )
     .unwrap();

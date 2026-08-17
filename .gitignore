@@ -31,3 +31,6 @@ target/
 # Python server virtualenv / caches
 /server/.venv/
 **/__pycache__/
+
+# Debug audio dump
+/server/last_stt.wav

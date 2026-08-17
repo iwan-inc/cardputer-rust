@@ -252,6 +252,21 @@ def _decode_audio(data):
     return audio
 
 
+def _save_debug_wav(data):
+    """デバッグ用に、受信音声を last_stt.wav（16kHz mono s16le）で保存する。"""
+    try:
+        audio = _decode_audio(data)
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+        with wave.open("last_stt.wav", "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(pcm)
+        print(f"  saved last_stt.wav ({len(pcm)} bytes)", flush=True)
+    except Exception as e:
+        print(f"  save failed: {e}", flush=True)
+
+
 def transcribe(data):
     """音声バイト列を日本語で文字起こしする。"""
     audio = _decode_audio(data)
@@ -272,6 +287,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/stt":
             # 音声（WAV か生 PCM）を文字起こしして画像で返す。
             print(f"[POST /stt] {len(body)} bytes", flush=True)
+            _save_debug_wav(body)
             text = transcribe(body)
             print(f"  -> {text!r}", flush=True)
             payload = render_text_1bpp(f"認識: {text}")
