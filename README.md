@@ -91,3 +91,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - `src/terminal.rs` — キーボード入力ループ（送信・AP一覧・IP・再起動）
 - `src/ui.rs` — LCD 表示ヘルパ（テキスト・画像・一覧）
 - `server/` — Python の API サーバー（画像描画・コマンド）
+
+## ライセンス
+
+[MIT License](LICENSE) © 2026 iwan-inc
