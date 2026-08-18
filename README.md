@@ -27,14 +27,17 @@ M5Stack Cardputer Adv (ESP32-S3) 用の Rust `no_std` プロジェクト。
 
 ## セットアップ
 
-秘密情報（Wi-Fi 認証情報）は git 管理外。クローン後に次を実行する。
+環境依存の値（Wi-Fi 認証情報・LAN 内サーバーのアドレス）は git 管理外。
+クローン後に次を実行する。
 
 ```sh
 cp src/secrets.example.rs src/secrets.rs
-# src/secrets.rs を編集して自分の SSID / パスワードを設定
+# src/secrets.rs を編集して以下を自分の環境に設定:
+#   WIFI_SSID / WIFI_PASSWORD
+#   SERVER_IP / SERVER_PORT / SERVER_HOST（接続先サーバーのアドレス）
 ```
 
-接続先サーバーなどそのほかの設定は `src/config.rs` にまとまっている。
+その他の設定（接続先のパスなど）は `src/config.rs` にまとまっている。
 
 ## ビルド / 実行
 
